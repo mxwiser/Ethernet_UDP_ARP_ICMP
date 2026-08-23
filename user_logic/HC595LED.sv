@@ -4,6 +4,7 @@ module HC595LED #(
     parameter integer CHIP_NUMBERS = 16,
     parameter integer CLK_FREQ_HZ = 50_000_000,
     parameter integer SHIFT_CLK_HZ = 1_000_000,
+    parameter integer REFRESH_HZ = 1_000,
     // 0: a '1' turns an LED on; 1: a '0' turns an LED on.
     parameter bit LED_ACTIVE_LOW = 1'b0
 )(
@@ -21,6 +22,11 @@ localparam integer SHIFT_HALF_CYCLES =
     (SHIFT_HALF_CYCLES_CALC < 1) ? 1 : SHIFT_HALF_CYCLES_CALC;
 localparam integer SHIFT_COUNT_WIDTH =
     (SHIFT_HALF_CYCLES <= 1) ? 1 : $clog2(SHIFT_HALF_CYCLES);
+localparam integer REFRESH_CYCLES_CALC = CLK_FREQ_HZ / REFRESH_HZ;
+localparam integer REFRESH_CYCLES =
+    (REFRESH_CYCLES_CALC < 1) ? 1 : REFRESH_CYCLES_CALC;
+localparam integer REFRESH_COUNT_WIDTH =
+    (REFRESH_CYCLES <= 1) ? 1 : $clog2(REFRESH_CYCLES);
 localparam integer LED_INDEX_WIDTH =
     (LED_COUNT <= 1) ? 1 : $clog2(LED_COUNT);
 localparam logic [LED_COUNT-1:0] OUTPUTS_OFF =
@@ -37,6 +43,7 @@ state_t state;
 logic [LED_COUNT-1:0] shift_pattern;
 logic [LED_COUNT-1:0] latched_pattern;
 logic [SHIFT_COUNT_WIDTH-1:0] shift_count;
+logic [REFRESH_COUNT_WIDTH-1:0] refresh_count;
 logic [LED_INDEX_WIDTH-1:0] shift_index;
 logic stcp;
 logic shcp;
@@ -81,6 +88,7 @@ always_ff @(posedge clk or negedge rstn) begin
         shift_pattern   <= OUTPUTS_OFF;
         latched_pattern <= OUTPUTS_OFF;
         shift_count     <= '0;
+        refresh_count   <= '0;
         shift_index     <= LED_INDEX_WIDTH'(LED_COUNT - 1);
         stcp            <= 1'b0;
         shcp            <= 1'b0;
@@ -90,7 +98,16 @@ always_ff @(posedge clk or negedge rstn) begin
         oen             <= 1'b1;
     end else begin
         // STCP is normally low and is held high for one shift half-period.
-        stcp <= 1'b0;
+        // Avoid assigning both 0 and 1 while already in STATE_LATCH so the
+        // simulation model sees one clean rising edge, matching the flip-flop.
+        if (state != STATE_LATCH)
+            stcp <= 1'b0;
+
+        // Count from the start of one transfer to the next. Saturating the
+        // counter also makes configurations whose transfer takes longer than
+        // one refresh period restart as soon as STATE_WAIT is reached.
+        if (refresh_count < REFRESH_CYCLES - 1)
+            refresh_count <= refresh_count + 1'b1;
 
         case (state)
             STATE_SHIFT_RISE: begin
@@ -135,12 +152,15 @@ always_ff @(posedge clk or negedge rstn) begin
             end
 
             STATE_WAIT: begin
-                // Transfer only when a valve state changes. If another state
-                // changes during transfer, it is picked up on the next pass.
-                if (desired_shift_pattern != latched_pattern) begin
+                // State changes are transferred immediately. Even with no
+                // state change, periodically rewrite the complete chain so a
+                // transiently corrupted external 74HC595 cannot remain stuck.
+                if ((desired_shift_pattern != latched_pattern) ||
+                    (refresh_count == REFRESH_CYCLES - 1)) begin
                     shift_pattern <= desired_shift_pattern;
                     shift_index   <= LED_INDEX_WIDTH'(LED_COUNT - 1);
                     shift_count   <= '0;
+                    refresh_count <= '0;
                     ser           <= desired_shift_pattern[LED_COUNT-1];
                     state         <= STATE_SHIFT_RISE;
                 end

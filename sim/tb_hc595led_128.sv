@@ -23,6 +23,8 @@ HC595LED #(
     .CHIP_NUMBERS  (16),
     .CLK_FREQ_HZ   (2_000),
     .SHIFT_CLK_HZ  (1_000),
+    // Keep periodic refresh away from the immediate-update mapping checks.
+    .REFRESH_HZ    (1),
     .LED_ACTIVE_LOW(1'b0)
 ) dut (
     .clk       (clk),

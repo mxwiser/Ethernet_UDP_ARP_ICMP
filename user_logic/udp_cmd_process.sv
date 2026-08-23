@@ -118,6 +118,7 @@ HC595LED #(
     .CHIP_NUMBERS (16),
     .CLK_FREQ_HZ  (SYS_CLK_FREQ_HZ),
     .SHIFT_CLK_HZ (1_000_000),
+    .REFRESH_HZ   (1_000),
     .LED_ACTIVE_LOW (1'b0)
 ) u_hc595_led (
     .clk       (clk),
