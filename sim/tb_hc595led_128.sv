@@ -8,6 +8,7 @@ localparam integer USER_LED_COUNT = 64;
 
 logic clk = 1'b0;
 logic rstn = 1'b0;
+logic [USER_LED_COUNT-1:0] valve_open_status = '0;
 logic [LED_COUNT-1:0] shift_register = '0;
 logic [LED_COUNT-1:0] output_register = '0;
 logic [LED_COUNT-1:0] expected_pattern;
@@ -21,12 +22,12 @@ hc595 led_bus();
 HC595LED #(
     .CHIP_NUMBERS  (16),
     .CLK_FREQ_HZ   (2_000),
-    .LED_STEP_MS   (1),
     .SHIFT_CLK_HZ  (1_000),
     .LED_ACTIVE_LOW(1'b0)
 ) dut (
     .clk       (clk),
     .rstn      (rstn),
+    .valve_open_status (valve_open_status),
     .hc595_led (led_bus)
 );
 
@@ -41,9 +42,20 @@ initial begin
     repeat (4) @(negedge clk);
     rstn = 1'b1;
 
+    // The first transfer after reset must safely blank all LEDs.
+    @(posedge led_bus.stcp);
+    #1;
+    if (led_bus.oen || (output_register !== '0)) begin
+        $error("reset: expected all LEDs off, got %032h (oen=%0b)",
+               output_register, led_bus.oen);
+        error_count = error_count + 1;
+    end
+
     for (led_number = 0;
          led_number < USER_LED_COUNT;
          led_number = led_number + 1) begin
+        @(negedge clk);
+        valve_open_status = 64'b1 << led_number;
         @(posedge led_bus.stcp);
         #1;
 
@@ -57,8 +69,18 @@ initial begin
         end
     end
 
+    // Closing the final valve must clear both of its indicator LEDs.
+    @(negedge clk);
+    valve_open_status = '0;
+    @(posedge led_bus.stcp);
+    #1;
+    if (output_register !== '0) begin
+        $error("close: expected all LEDs off, got %032h", output_register);
+        error_count = error_count + 1;
+    end
+
     if (error_count == 0)
-        $display("PASS: user LEDs 0..63 light the matching positions in both PCB rows");
+        $display("PASS: each of 64 valve states controls both matching PCB-row LEDs");
     else
         $fatal(1, "FAIL: %0d running-light errors", error_count);
 

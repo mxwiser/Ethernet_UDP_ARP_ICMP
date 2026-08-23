@@ -30,6 +30,7 @@ wire [3:0]  pwm_s1_wr_duty;
 wire        pwm_s2_wr_en;
 wire [5:0]  pwm_s2_wr_addr;
 wire [3:0]  pwm_s2_wr_duty;
+wire [63:0] valve_open_status;
 
 // The command parser validates one complete UDP payload before placing it
 // into the FIFO. If the FIFO is full at that instant, the command is dropped.
@@ -79,7 +80,8 @@ valve_controller #(
     .pwm_s1_wr_duty   (pwm_s1_wr_duty),
     .pwm_s2_wr_en     (pwm_s2_wr_en),
     .pwm_s2_wr_addr   (pwm_s2_wr_addr),
-    .pwm_s2_wr_duty   (pwm_s2_wr_duty)
+    .pwm_s2_wr_duty   (pwm_s2_wr_duty),
+    .valve_open_status(valve_open_status)
 );
 
 HC595PWM #(
@@ -115,12 +117,12 @@ HC595PWM #(
 HC595LED #(
     .CHIP_NUMBERS (16),
     .CLK_FREQ_HZ  (SYS_CLK_FREQ_HZ),
-    .LED_STEP_MS  (100),
     .SHIFT_CLK_HZ (1_000_000),
     .LED_ACTIVE_LOW (1'b0)
 ) u_hc595_led (
     .clk       (clk),
     .rstn      (rstn),
+    .valve_open_status (valve_open_status),
     .hc595_led (hc595_led)
 );
 endmodule

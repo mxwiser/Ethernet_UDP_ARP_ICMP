@@ -16,7 +16,10 @@ module valve_controller #(
     output logic [3:0]  pwm_s1_wr_duty,
     output logic        pwm_s2_wr_en,
     output logic [5:0]  pwm_s2_wr_addr,
-    output logic [3:0]  pwm_s2_wr_duty
+    output logic [3:0]  pwm_s2_wr_duty,
+
+    // One bit per user valve. High throughout both boost and hold phases.
+    output logic [VALVE_COUNT-1:0] valve_open_status
 );
 
 localparam logic [1:0] COMMAND_OPEN = 2'd1;
@@ -320,7 +323,16 @@ always_ff @(posedge clk or negedge rstn) begin
         second_pwm_is_b        <= 1'b0;
         second_pwm_duty        <= '0;
         second_return_to_apply <= 1'b0;
+        valve_open_status      <= '0;
     end else begin
+        // Mirror the logical valve state for the two-row LED indicator board.
+        // Set it when energizing A/B and clear it when the close sequence
+        // starts. It remains high when B changes from boost to hold PWM.
+        if (apply_starts_now || timer_opens)
+            valve_open_status[work_index] <= 1'b1;
+        else if (timer_closes)
+            valve_open_status[work_index] <= 1'b0;
+
         if (timer_divider == TIMER_CYCLES - 1) begin
             timer_divider <= '0;
             timer_pending <= 1'b1;
