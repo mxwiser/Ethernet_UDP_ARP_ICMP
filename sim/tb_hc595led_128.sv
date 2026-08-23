@@ -1,0 +1,65 @@
+`timescale 1ns/1ps
+`include "hc595.svh"
+
+module tb_hc595led_128;
+
+localparam integer LED_COUNT = 128;
+
+logic clk = 1'b0;
+logic rstn = 1'b0;
+logic [LED_COUNT-1:0] shift_register = '0;
+logic [LED_COUNT-1:0] output_register = '0;
+logic [LED_COUNT-1:0] expected_pattern;
+integer led_number;
+integer error_count = 0;
+
+always #5 clk = ~clk;
+
+hc595 led_bus();
+
+HC595LED #(
+    .CHIP_NUMBERS  (16),
+    .CLK_FREQ_HZ   (2_000),
+    .LED_STEP_MS   (1),
+    .SHIFT_CLK_HZ  (1_000),
+    .LED_ACTIVE_LOW(1'b0)
+) dut (
+    .clk       (clk),
+    .rstn      (rstn),
+    .hc595_led (led_bus)
+);
+
+// Model 16 cascaded 74HC595s. Bit 0 is Q0 of the first chip at SER.
+always @(posedge led_bus.shcp)
+    shift_register <= {shift_register[LED_COUNT-2:0], led_bus.ser};
+
+always @(posedge led_bus.stcp)
+    output_register <= shift_register;
+
+initial begin
+    repeat (4) @(negedge clk);
+    rstn = 1'b1;
+
+    for (led_number = 0;
+         led_number < LED_COUNT;
+         led_number = led_number + 1) begin
+        @(posedge led_bus.stcp);
+        #1;
+
+        expected_pattern = 128'b1 << led_number;
+        if (led_bus.oen || (output_register !== expected_pattern)) begin
+            $error("step %0d: expected LED bitmap %032h, got %032h (oen=%0b)",
+                   led_number, expected_pattern, output_register, led_bus.oen);
+            error_count = error_count + 1;
+        end
+    end
+
+    if (error_count == 0)
+        $display("PASS: 128 LEDs run from first-chip Q0 through sixteenth-chip Q7");
+    else
+        $fatal(1, "FAIL: %0d running-light errors", error_count);
+
+    $finish;
+end
+
+endmodule

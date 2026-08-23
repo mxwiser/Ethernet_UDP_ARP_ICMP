@@ -1,7 +1,7 @@
 `include "hc595.svh"
 
 module HC595LED #(
-    parameter integer CHIP_NUMBERS = 8,
+    parameter integer CHIP_NUMBERS = 16,
     parameter integer CLK_FREQ_HZ = 50_000_000,
     parameter integer LED_STEP_MS = 100,
     parameter integer SHIFT_CLK_HZ = 1_000_000,
