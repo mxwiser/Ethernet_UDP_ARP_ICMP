@@ -3,6 +3,34 @@
 `include "hc595.svh"
 // EP4CE10 + IP101GRI UDP 回环（RMII 版本）
 // PC 发来的 UDP 数据经 eth_axis 解析后存入 FIFO, 回环发回 PC
+// Generate the PLL's active-high power-on reset entirely from the raw input
+// clock. This avoids depending on a PLL output clock to release the PLL itself.
+module pll_areset_generator #(
+	parameter integer INPUT_CLK_FREQ_HZ = 40_000_000,
+	parameter integer RESET_TIME_MS = 1
+)(
+	input  logic clkin,
+	output logic areset = 1'b1
+);
+	localparam integer RESET_CYCLES_CALC =
+		(INPUT_CLK_FREQ_HZ / 1_000) * RESET_TIME_MS;
+	localparam integer RESET_CYCLES =
+		(RESET_CYCLES_CALC < 1) ? 1 : RESET_CYCLES_CALC;
+	localparam integer RESET_COUNT_WIDTH =
+		(RESET_CYCLES <= 1) ? 1 : $clog2(RESET_CYCLES);
+
+	logic [RESET_COUNT_WIDTH-1:0] reset_count = '0;
+
+	always_ff @(posedge clkin) begin
+		if (reset_count == RESET_COUNT_WIDTH'(RESET_CYCLES - 1)) begin
+			areset <= 1'b0;
+		end else begin
+			reset_count <= reset_count + 1'b1;
+			areset      <= 1'b1;
+		end
+	end
+endmodule
+
 module top (
 	output  logic                       led,
 	input	logic                       clkin,
@@ -21,6 +49,8 @@ module top (
 );
 	// Single RTL source of truth for the PLL c0 system-clock frequency.
 	// When PLL c0 is changed, update this value to match it.
+	localparam integer PLL_INPUT_CLK_FREQ_HZ = 40_000_000;
+	localparam integer PLL_ARESET_MS = 1;
 	localparam integer SYS_CLK_FREQ_HZ = 50_000_000;
 	localparam integer POWER_ON_RESET_MS = 11;
 	localparam integer POWER_ON_RESET_CYCLES =
@@ -29,7 +59,18 @@ module top (
 		$clog2(POWER_ON_RESET_CYCLES + 1);
 
 	wire clk;
+	logic areset_sig;
+
+	pll_areset_generator #(
+		.INPUT_CLK_FREQ_HZ ( PLL_INPUT_CLK_FREQ_HZ ),
+		.RESET_TIME_MS     ( PLL_ARESET_MS )
+	) u_pll_areset_generator (
+		.clkin  ( clkin      ),
+		.areset ( areset_sig )
+	);
+
 	pll	pll_inst (
+		.areset ( areset_sig ),
 		.inclk0 ( clkin ),
 		.c0 ( clk ),
 		.c1 ( mdc )
