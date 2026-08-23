@@ -1,6 +1,6 @@
 module ip_conf #(
     parameter logic [47:0] BASE_BOARD_MAC_ADDR = 48'h60_A8_01_33_44_00,
-    parameter logic [31:0] BASE_BOARD_IP_ADDR  = 32'hC0_A8_01_32
+    parameter logic [31:0] BASE_BOARD_IP_ADDR  = 32'hC0_A8_C8_32
 )(
     input  wire         clk,
     input  wire         rstn,
