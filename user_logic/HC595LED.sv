@@ -14,6 +14,7 @@ module HC595LED #(
 );
 
 localparam integer LED_COUNT = CHIP_NUMBERS * 8;
+localparam integer ROW_LED_COUNT = LED_COUNT / 2;
 localparam integer STEP_CYCLES_CALC =
     (CLK_FREQ_HZ / 1_000) * LED_STEP_MS;
 localparam integer STEP_CYCLES =
@@ -31,7 +32,7 @@ localparam integer LED_INDEX_WIDTH =
     (LED_COUNT <= 1) ? 1 : $clog2(LED_COUNT);
 
 localparam logic [LED_COUNT-1:0] INITIAL_LED_PATTERN =
-    {{(LED_COUNT-1){1'b0}}, 1'b1};
+    {1'b1, {(LED_COUNT-2){1'b0}}, 1'b1};
 
 typedef enum logic [1:0] {
     STATE_SHIFT_RISE,
@@ -51,8 +52,19 @@ logic shcp;
 logic ser;
 logic oen;
 
+// The board is one serpentine chain arranged as two 64-LED rows:
+//   serial bits   0..63  -> first row, physically left to right
+//   serial bits 64..127 -> second row, physically right to left
+// User LED n therefore drives physical serial bits n and 127-n together.
+// Rotate the first half upward and the second half downward so both physical
+// rows display the same user number while the user sequence remains 0..63.
+wire [ROW_LED_COUNT-1:0] next_first_row_pattern =
+    {led_pattern[ROW_LED_COUNT-2:0], led_pattern[ROW_LED_COUNT-1]};
+wire [ROW_LED_COUNT-1:0] next_second_row_pattern =
+    {led_pattern[ROW_LED_COUNT],
+     led_pattern[LED_COUNT-1:ROW_LED_COUNT+1]};
 wire [LED_COUNT-1:0] next_led_pattern =
-    {led_pattern[LED_COUNT-2:0], led_pattern[LED_COUNT-1]};
+    {next_second_row_pattern, next_first_row_pattern};
 wire [LED_COUNT-1:0] next_shift_pattern =
     LED_ACTIVE_LOW ? ~next_led_pattern : next_led_pattern;
 
@@ -61,8 +73,8 @@ assign hc595_led.shcp = shcp;
 assign hc595_led.ser  = ser;
 assign hc595_led.oen  = oen;
 
-// Shift bit 63 first and bit 0 last. After 64 clocks, pattern bit 0 is
-// presented on QA of the first 74HC595 in the chain.
+// Shift the highest bit first and bit 0 last. After LED_COUNT clocks,
+// pattern bit 0 is presented on Q0 of the first 74HC595 in the chain.
 always_ff @(posedge clk or negedge rstn) begin
     if (!rstn) begin
         state         <= STATE_SHIFT_RISE;
@@ -78,7 +90,7 @@ always_ff @(posedge clk or negedge rstn) begin
                          ~INITIAL_LED_PATTERN[LED_COUNT-1] :
                           INITIAL_LED_PATTERN[LED_COUNT-1];
         // 74HC595 OE is active low. Keep all outputs disabled until the
-        // first complete 64-bit pattern has been shifted and latched.
+        // first complete LED_COUNT-bit pattern has been shifted and latched.
         oen           <= 1'b1;
     end else begin
         // STCP is normally low and is held high for one shift half-period.
@@ -113,7 +125,7 @@ always_ff @(posedge clk or negedge rstn) begin
             end
 
             STATE_LATCH: begin
-                // Update all 64 parallel outputs simultaneously.
+                // Update all LED_COUNT parallel outputs simultaneously.
                 stcp <= 1'b1;
 
                 if (shift_count == SHIFT_HALF_CYCLES - 1) begin

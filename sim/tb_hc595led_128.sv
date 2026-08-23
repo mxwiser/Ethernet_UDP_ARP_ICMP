@@ -4,6 +4,7 @@
 module tb_hc595led_128;
 
 localparam integer LED_COUNT = 128;
+localparam integer USER_LED_COUNT = 64;
 
 logic clk = 1'b0;
 logic rstn = 1'b0;
@@ -41,12 +42,14 @@ initial begin
     rstn = 1'b1;
 
     for (led_number = 0;
-         led_number < LED_COUNT;
+         led_number < USER_LED_COUNT;
          led_number = led_number + 1) begin
         @(posedge led_bus.stcp);
         #1;
 
-        expected_pattern = 128'b1 << led_number;
+        expected_pattern =
+            (128'b1 << led_number) |
+            (128'b1 << (LED_COUNT - 1 - led_number));
         if (led_bus.oen || (output_register !== expected_pattern)) begin
             $error("step %0d: expected LED bitmap %032h, got %032h (oen=%0b)",
                    led_number, expected_pattern, output_register, led_bus.oen);
@@ -55,7 +58,7 @@ initial begin
     end
 
     if (error_count == 0)
-        $display("PASS: 128 LEDs run from first-chip Q0 through sixteenth-chip Q7");
+        $display("PASS: user LEDs 0..63 light the matching positions in both PCB rows");
     else
         $fatal(1, "FAIL: %0d running-light errors", error_count);
 
