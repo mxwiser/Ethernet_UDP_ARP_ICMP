@@ -114,37 +114,51 @@ assign memory_read_address = work_index;
 // --------------------------------------------------------------------------
 // PCB mapping section
 // --------------------------------------------------------------------------
-// PCB输出映射集中放在这里，后续PCB走线发生变化时，只需要修改下面三个函数。
+// 用户层阀门编号按照 PCB 上从右向左的物理顺序排列：
+//   0～31  -> 右侧 S1 的 8 片 74HC595
+//   32～63 -> 左侧 S2 的 8 片 74HC595
+// 每一串的芯片以及每片芯片上的 c0～c3 均从右向左排列。
+// HC595PWM 通道 0 对应最右侧第一片芯片的 QA，通道 8 对应下一片的 QA。
 //
-// 当前默认接线：
-//   hc595_s1控制阀门0～31，hc595_s2控制阀门32～63；
-//   每个阀门占用两个相邻输出，偶数通道接A端，奇数通道接B端。
-//
-// 例如阀门0：
-//   hc595_s1的Q0(QA)接A端，Q1(QB)接B端，即Q1Q0 = BA。
-// 例如阀门1：
-//   hc595_s1的Q2(QC)接A端，Q3(QD)接B端。
+// 每片 74HC595 的 PCB 接线：
+//                  c0       c1       c2       c3
+//   反向电动势 A： Q0       Q4       Q3       Q7
+//   PWM 控制 B：   Q1       Q2       Q5       Q6
 function automatic logic map_valve_to_group(input logic [5:0] valve_number);
-    // 阀门编号为6位，最高位valve_number[5]从编号32开始变为1：
-    //   0：阀门0～31，选择hc595_s1；
-    //   1：阀门32～63，选择hc595_s2。
+    // 编号 0～31 选择 S1，编号 32～63 选择 S2。
     map_valve_to_group = valve_number[5];
 endfunction
 
 function automatic [5:0] map_valve_to_a_channel(
     input logic [5:0] valve_number
 );
-    // 只取组内编号valve_number[4:0]，末尾拼接一个0，相当于乘以2。
-    // 因此每个阀门的A端使用偶数通道：阀门0->Q0、阀门1->Q2……
-    map_valve_to_a_channel = {valve_number[4:0], 1'b0};
+    logic [2:0] q_index;
+    begin
+        case (valve_number[1:0])
+            2'd0: q_index = 3'd0; // c0 A -> Q0
+            2'd1: q_index = 3'd4; // c1 A -> Q4
+            2'd2: q_index = 3'd3; // c2 A -> Q3
+            default: q_index = 3'd7; // c3 A -> Q7
+        endcase
+
+        map_valve_to_a_channel = {valve_number[4:2], q_index};
+    end
 endfunction
 
 function automatic [5:0] map_valve_to_b_channel(
     input logic [5:0] valve_number
 );
-    // 末尾拼接一个1，相当于“组内阀门编号乘以2再加1”。
-    // 因此每个阀门的B端使用奇数通道：阀门0->Q1、阀门1->Q3……
-    map_valve_to_b_channel = {valve_number[4:0], 1'b1};
+    logic [2:0] q_index;
+    begin
+        case (valve_number[1:0])
+            2'd0: q_index = 3'd1; // c0 B -> Q1
+            2'd1: q_index = 3'd2; // c1 B -> Q2
+            2'd2: q_index = 3'd5; // c2 B -> Q5
+            default: q_index = 3'd6; // c3 B -> Q6
+        endcase
+
+        map_valve_to_b_channel = {valve_number[4:2], q_index};
+    end
 endfunction
 
 // Infer one synchronous-read, synchronous-write memory. It is explicitly
