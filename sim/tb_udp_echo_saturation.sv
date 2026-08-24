@@ -67,7 +67,12 @@ module eth_axis (
     assign arp_pc_refresh = 1'b0;
 endmodule
 
-module tb_udp_echo_saturation;
+module tb_udp_echo_saturation #(
+    parameter integer RMII_PHASE_NS = 3,
+    parameter integer MIN_FRAME_PACKETS = 100,
+    parameter integer MTU_PACKETS = 50,
+    parameter integer JUMBO_PACKETS = 100
+);
     localparam [47:0] BOARD_MAC = 48'h50_12_22_33_44_55;
     localparam [31:0] BOARD_IP  = 32'h0a_0a_01_0a;
     localparam [47:0] PC_MAC    = 48'h02_11_22_33_44_55;
@@ -78,7 +83,7 @@ module tb_udp_echo_saturation;
     reg rstn = 1'b0;
     always #10 sys_clk = ~sys_clk; // 50 MHz system clock
     initial begin
-        #3;
+        #(RMII_PHASE_NS);
         forever #10 rmii_clk = ~rmii_clk; // 50 MHz, phase-offset CDC clock
     end
 
@@ -379,8 +384,8 @@ module tb_udp_echo_saturation;
                  packet_index = packet_index + 1)
                 transmit_frame_at_line_rate();
             wait_until_drained(packet_count);
-            $display("SATURATION_CASE name=%0s payload=%0d sent=%0d rx_valid=%0d committed=%0d dropped=%0d overflows=%0d tx_packets=%0d tx_axis_frames=%0d cdc_boundaries=%0d rmii_frames=%0d payload_reads=%0d max_data=%0d max_committed=%0d max_meta=%0d tx_aborts=%0d",
-                     case_name, payload_len, packet_count, rx_done_count,
+            $display("SATURATION_CASE phase_ns=%0d name=%0s payload=%0d sent=%0d rx_valid=%0d committed=%0d dropped=%0d overflows=%0d tx_packets=%0d tx_axis_frames=%0d cdc_boundaries=%0d rmii_frames=%0d payload_reads=%0d max_data=%0d max_committed=%0d max_meta=%0d tx_aborts=%0d",
+                     RMII_PHASE_NS, case_name, payload_len, packet_count, rx_done_count,
                      commit_count, rx_done_count-commit_count, overflow_count,
                      meta_accept_count, udp_axis_frame_count, cdc_boundary_count,
                      output_frame_count, payload_read_count, max_data_occupancy,
@@ -389,8 +394,8 @@ module tb_udp_echo_saturation;
                 cdc_boundary_count != output_frame_count ||
                 tx_abort_count != 0 || meta_accept_count != commit_count ||
                 payload_read_count != commit_count * payload_len) begin
-                $display("SATURATION_BOUNDARY_FAIL name=%0s axis=%0d cdc=%0d rmii=%0d aborts=%0d commits=%0d accepted=%0d reads=%0d/%0d",
-                         case_name, udp_axis_frame_count, cdc_boundary_count,
+                $display("SATURATION_BOUNDARY_FAIL phase_ns=%0d name=%0s axis=%0d cdc=%0d rmii=%0d aborts=%0d commits=%0d accepted=%0d reads=%0d/%0d",
+                         RMII_PHASE_NS, case_name, udp_axis_frame_count, cdc_boundary_count,
                          output_frame_count, tx_abort_count, commit_count,
                          meta_accept_count, payload_read_count,
                          commit_count * payload_len);
@@ -463,12 +468,13 @@ module tb_udp_echo_saturation;
         rx_axis.tkeep = 1'b1;
         rx_axis.tstrb = 1'b1;
 
-        report_case("min_frame", 12, 100);
-        report_case("mtu_1472", 1472, 50);
-        report_case("jumbo_1473", 1473, 100);
+        report_case("min_frame", 12, MIN_FRAME_PACKETS);
+        report_case("mtu_1472", 1472, MTU_PACKETS);
+        report_case("jumbo_1473", 1473, JUMBO_PACKETS);
 
         if (regression_failures == 0)
-            $display("SATURATION_REGRESSION_PASS boundary_cases=3");
+            $display("SATURATION_REGRESSION_PASS phase_ns=%0d boundary_cases=3",
+                     RMII_PHASE_NS);
         else
             $fatal(1, "SATURATION_REGRESSION_FAIL failures=%0d",
                    regression_failures);
