@@ -19,6 +19,37 @@ module udp_axis_tx #(
 	pc_head.slave							tx_head
 );
 
+	localparam		IDLE					= 18'h0_0001,
+					PACKAGE_HEAD			= 18'h0_0002,
+					MAC_ADDR				= 18'h0_0004,
+					TYPE					= 18'h0_0008,
+					IP_TYPE					= 18'h0_0010,
+					IP_LEN					= 18'h0_0020,
+					IP_ID					= 18'h0_0040,
+					IP_SPLIT				= 18'h0_0080,
+					IP_TTL					= 18'h0_0100,
+					IP_PROTOCOL				= 18'h0_0200,
+					IP_CHECK				= 18'h0_0400,
+					IP_ADDR					= 18'h0_0800,
+					UDP_PORT				= 18'h0_1000,
+					UDP_LEN					= 18'h0_2000,
+					UDP_CHECK				= 18'h0_4000,
+					DATA					= 18'h0_8000,
+					CRC						= 18'h1_0000,
+					WAIT					= 18'h2_0000;
+
+	reg		[17:0]							state;
+	wire	[31:0]							ip_checksum_sum_w;
+
+	function automatic [15:0] ipv4_checksum(input [31:0] sum);
+		reg [16:0] fold1;
+		reg [16:0] fold2;
+		begin
+			fold1 = {1'b0, sum[15:0]} + sum[31:16];
+			fold2 = {1'b0, fold1[15:0]} + fold1[16];
+			ipv4_checksum = ~({15'b0, fold2[16]} + fold2[15:0]);
+		end
+	endfunction
 
 // -------------------------------- axis <-> gmii bridge ------------------------------------------
 // gmii_txen && !gmii_txbusy  ==  tvalid && tready, so the original FSM body is unchanged
@@ -32,27 +63,6 @@ module udp_axis_tx #(
 	assign		m_axis_tx.tuser		=	1'b0;
 	assign		m_axis_tx.tdata		=	gmii_txdata;
 
-	localparam		IDLE					= 18'h0_0001,
-					PACKAGE_HEAD			= 18'h0_0002,
-					MAC_ADDR				= 18'h0_0004,					// destination MAC and source MAC
-					TYPE					= 18'h0_0008,					// 'h0800, only IPv4 supported
-					IP_TYPE					= 18'h0_0010,					// IP version, IP header length ( *4 Byte ), service type, 'h4500
-					IP_LEN					= 18'h0_0020,					// network length
-					IP_ID					= 18'h0_0040,					// identification
-					IP_SPLIT				= 18'h0_0080,					// flags and fragment offset
-					IP_TTL					= 18'h0_0100,					// time to live, initial value is 64 or 128
-					IP_PROTOCOL				= 18'h0_0200,					// UDP: 17
-					IP_CHECK				= 18'h0_0400,					// IP header checksum, ignore it
-					IP_ADDR					= 18'h0_0800,					// source IP address and destination IP address
-					UDP_PORT				= 18'h0_1000,					// source PORT and destination PORT
-					UDP_LEN					= 18'h0_2000,					// udp length, ( = network length - IP header length ) if have not split
-					UDP_CHECK				= 18'h0_4000,					// udp checksum, ignore it
-					DATA					= 18'h0_8000,
-					CRC						= 18'h1_0000,
-					WAIT					= 18'h2_0000;
-
-	reg		[17:0]							state;
-	
 	reg		[2:0]							cnt_package_head;
 	reg		[3:0]							cnt_mac_addr;
 	reg										cnt_type;
@@ -82,6 +92,12 @@ module udp_axis_tx #(
 	reg		[31:0]							pc_ip_addr_latched;
 	reg		[15:0]							pc_port_latched;
 	reg		[15:0]							board_port_latched;
+
+	assign ip_checksum_sum_w = {16'h0000, 16'h4500} +
+		{16'h0000, ip_data_len} + {16'h0000, ip_id} +
+		{16'h0000, flags} + {16'h0000, 16'h4011} +
+		{16'h0000, BOARD_IP_ADDR[31:16]} + {16'h0000, BOARD_IP_ADDR[15:0]} +
+		{16'h0000, pc_ip_addr_latched[31:16]} + {16'h0000, pc_ip_addr_latched[15:0]};
 
 // Capture all per-packet addressing metadata when a new UDP transfer is accepted.
 // Keep it unchanged for the whole transfer, including every IP fragment.
@@ -235,7 +251,10 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	endcase
 end
 
-assign		udp_txreq		=	( ( state ==IP_ADDR && cnt_ip_addr >= 3'd7 && udp_continue ) || ( state == UDP_CHECK && cnt_udp_check ) || ( state == DATA && cnt_data < udp_rest - 1 && cnt_data < 'd1479 ) ) && gmii_txen && !gmii_txbusy;
+assign		udp_txreq		=	( ( state == IP_ADDR && cnt_ip_addr >= 3'd7 && udp_continue ) ||
+								  ( state == UDP_CHECK && cnt_udp_check && udp_rest > 16'd8 ) ||
+								  ( state == DATA && udp_rest > 16'd8 && cnt_data < udp_rest - 1 && cnt_data < 'd1479 ) ) &&
+								  gmii_txen && !gmii_txbusy;
 
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
@@ -431,9 +450,7 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		ip_checksum <= 32'h0;
 	end else if ( state == IP_SPLIT && cnt_ip_split && gmii_txen && !gmii_txbusy ) begin
-		ip_checksum <= 16'h4500 + ip_data_len + ip_id + 16'h0000 + 16'h4011 + BOARD_IP_ADDR[31:16] + BOARD_IP_ADDR[15:0] + pc_ip_addr_latched[31:16] + pc_ip_addr_latched[15:0];
-	end else if ( state == IP_TTL ) begin
-		ip_checksum <= ip_checksum[31:16] + ip_checksum[15:0];
+		ip_checksum <= {16'h0000, ipv4_checksum(ip_checksum_sum_w)};
 	end else begin
 		ip_checksum <= ip_checksum;
 	end
@@ -700,14 +717,14 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 		end
 		IP_PROTOCOL: begin
 			if ( gmii_txen && !gmii_txbusy ) begin
-				gmii_txdata <= ip_checksum[15:8] ^ 8'hff;
+				gmii_txdata <= ip_checksum[15:8];
 			end else begin
 				gmii_txdata <= gmii_txdata;
 			end
 		end
 		IP_CHECK: begin
 			if ( !cnt_ip_check && gmii_txen && !gmii_txbusy ) begin
-				gmii_txdata <= ip_checksum[7:0] ^ 8'hff;
+				gmii_txdata <= ip_checksum[7:0];
 			end else if ( cnt_ip_check && gmii_txen && !gmii_txbusy ) begin
 				gmii_txdata <= BOARD_IP_ADDR[31:24];
 			end else begin

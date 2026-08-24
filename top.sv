@@ -77,6 +77,7 @@ udp	u1_udp (
 udp_ring u_udp_ring (
 	.clk								( clk				),
 	.rstn								( rstn				),
+	.udp_rxstart						( udp_rxstart		),
 	.udp_rxframe_done					( udp_rxframe_done	),
 	.udp_rxdv							( udp_rxdv			),
 	.udp_rxdata							( udp_rxdata			),

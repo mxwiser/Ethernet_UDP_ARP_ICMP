@@ -101,7 +101,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/phy_rmii_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/phy_mii_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/tx_cdc_fifo_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/rx_cdc_fifo_axis.sv
-set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/dcfifo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/eth_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/udp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/udp_axis_tx.sv
