@@ -36,6 +36,7 @@ import subprocess
 import os
 import sys
 import threading
+import signal
 
 BOARD_IP   = '192.168.200.52'
 BOARD_PORT = 10100
@@ -86,13 +87,25 @@ def build_param_cmd(hv_ms: float, duty: int) -> bytes:
     return body + (zlib.crc32(body) & 0xFFFFFFFF).to_bytes(4, 'big')
 
 
-def wait_until(ns: int):
+def wait_until(ns: int, stop_event=None):
     """睡到目标时刻: 粗睡到剩1.5ms, 余下自旋 (本机 sleep 会睡过头2~3ms)."""
-    rest = ns - time.perf_counter_ns()
-    if rest > 1_500_000:
-        time.sleep((rest - 1_500_000) / 1e9)
-    while time.perf_counter_ns() < ns:
-        pass
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return False
+        rest = ns - time.perf_counter_ns()
+        if rest <= 0:
+            return True
+        if rest > 1_500_000:
+            sleep_seconds = (rest - 1_500_000) / 1e9
+            if stop_event is None:
+                time.sleep(sleep_seconds)
+            elif stop_event.wait(sleep_seconds):
+                return False
+        else:
+            while time.perf_counter_ns() < ns:
+                if stop_event is not None and stop_event.is_set():
+                    return False
+            return True
 
 
 def main():
@@ -186,6 +199,18 @@ def main():
     round_rtt_ms = collections.defaultdict(list)
     stats_condition = threading.Condition()
     receiver_stop = threading.Event()
+    stop_requested = threading.Event()
+    stop_notice_printed = False
+
+    def request_safe_stop(_signum=None, _frame=None):
+        """Request a stop without interrupting send/accounting mid-group."""
+        nonlocal stop_notice_printed
+        stop_requested.set()
+        if not stop_notice_printed:
+            stop_notice_printed = True
+            print('\n⏹ 收到 Ctrl+C：停止新组，正在完成当前组并等待已发送回显...')
+
+    previous_sigint_handler = signal.signal(signal.SIGINT, request_safe_stop)
 
     groups = tx = echo = 0
     late_or_duplicate = ignored = receive_errors = 0
@@ -279,14 +304,20 @@ def main():
 
     t_group = time.perf_counter_ns() + 200_000_000     # 0.2s 后开始, 给打印留时间
     try:
-        while args.count == 0 or groups < args.count:
+        while ((args.count == 0 or groups < args.count) and
+               not stop_requested.is_set()):
             for a, b in pairs:          # (0,1) (2,3) ... (42,43), 一轮后 for 自然回卷重来
-                if args.count and groups >= args.count:
+                if stop_requested.is_set() or (args.count and groups >= args.count):
                     break
                 round_id = cycles + 1
-                wait_until(t_group)
+                # Safe boundary: no command from this group has been sent.
+                if not wait_until(t_group, stop_requested):
+                    break
                 t1 = time.perf_counter_ns()
                 send_command(frames[a], round_id)
+                # After the first send, always finish the pair. The SIGINT
+                # handler only sets a flag, so this section cannot be torn in
+                # half by Ctrl+C.
                 wait_until(t1 + int((args.blow + args.gap) * 1e6))   # 孔b = t + blow + gap
                 t2 = time.perf_counter_ns()
                 send_command(frames[b], round_id)
@@ -295,7 +326,7 @@ def main():
                 intra_ms.append(intra); r_intra.append(intra)
                 # 后台线程持续收回显；主线程只负责精确的阀门发送节奏。
                 t_next = t2 + int((args.blow + args.group_interval) * 1e6)
-                wait_until(t_next)
+                wait_until(t_next, stop_requested)
                 period = (t_next - t_group) / 1e6
                 period_ms.append(period); r_period.append(period)
                 t_group = t_next
@@ -325,6 +356,7 @@ def main():
                     if time.perf_counter_ns() - wait_started_ns > 1_000_000:
                         t_group = time.perf_counter_ns()
     except KeyboardInterrupt:
+        request_safe_stop()
         print('\n⏹  收到 Ctrl+C, 停止')
 
     # A finite --count or Ctrl+C can stop in the middle of a round. Give every
@@ -336,6 +368,7 @@ def main():
 
     receiver_stop.set()
     receiver_thread.join(timeout=0.2)
+    signal.signal(signal.SIGINT, previous_sigint_handler)
 
     lost = tx - echo
     print(f'\n📊 统计: 共 {groups} 组 / {tx} 条命令, 完整扫描 {cycles} 轮, '
