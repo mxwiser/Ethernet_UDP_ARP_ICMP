@@ -121,6 +121,7 @@ module tb_udp_echo_saturation;
     integer max_committed_count = 0;
     integer max_meta_count = 0;
     integer tx_abort_count = 0;
+    integer regression_failures = 0;
     reg rmii_txen_d = 1'b0;
     reg tx_abort_d = 1'b0;
     reg udp_axis_last_d = 1'b0;
@@ -384,6 +385,17 @@ module tb_udp_echo_saturation;
                      meta_accept_count, udp_axis_frame_count, cdc_boundary_count,
                      output_frame_count, payload_read_count, max_data_occupancy,
                      max_committed_count, max_meta_count, tx_abort_count);
+            if (udp_axis_frame_count != cdc_boundary_count ||
+                cdc_boundary_count != output_frame_count ||
+                tx_abort_count != 0 || meta_accept_count != commit_count ||
+                payload_read_count != commit_count * payload_len) begin
+                $display("SATURATION_BOUNDARY_FAIL name=%0s axis=%0d cdc=%0d rmii=%0d aborts=%0d commits=%0d accepted=%0d reads=%0d/%0d",
+                         case_name, udp_axis_frame_count, cdc_boundary_count,
+                         output_frame_count, tx_abort_count, commit_count,
+                         meta_accept_count, payload_read_count,
+                         commit_count * payload_len);
+                regression_failures = regression_failures + 1;
+            end
         end
     endtask
 
@@ -455,7 +467,11 @@ module tb_udp_echo_saturation;
         report_case("mtu_1472", 1472, 50);
         report_case("jumbo_1473", 1473, 100);
 
-        $display("SATURATION_REGRESSION_DONE");
+        if (regression_failures == 0)
+            $display("SATURATION_REGRESSION_PASS boundary_cases=3");
+        else
+            $fatal(1, "SATURATION_REGRESSION_FAIL failures=%0d",
+                   regression_failures);
         $finish;
     end
 

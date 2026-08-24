@@ -118,8 +118,16 @@ module phy_rmii_axis(
     logic [7:0] tx_shift;
     logic [7:0] tx_ifg_cnt;
     logic       tx_abort;
+    logic       tx_end_pending;
 
-    wire tx_can_accept = (tx_nib_cnt == 2'd3) || !tx_buf_valid;
+    // tlast is a frame-level signal in this project. The CDC can briefly
+    // present its falling edge while the final byte is still being shifted,
+    // then prefetch the first byte of the next frame. Latch that falling edge
+    // until the current byte reaches its last dibit, and block the next-byte
+    // handshake in the meantime.
+    wire tx_end_seen = tx_end_pending || (tx_buf_valid && !s_rmii_tx_axis_net.tlast);
+    wire tx_can_accept = !tx_end_seen &&
+                         ((tx_nib_cnt == 2'd3) || !tx_buf_valid);
     wire tx_accept = s_rmii_tx_axis_net.tvalid && s_rmii_tx_axis_net.tlast &&
                      (tx_ifg_cnt == 8'd0) && tx_can_accept;
 
@@ -135,12 +143,14 @@ module phy_rmii_axis(
             rmii_txen    <= 1'b0;
             tx_ifg_cnt   <= 8'd0;
             tx_abort     <= 1'b0;
+            tx_end_pending <= 1'b0;
         end else begin
             if (tx_ifg_cnt != 8'd0)
                 tx_ifg_cnt <= tx_ifg_cnt - 8'd1;
 
             if (tx_abort) begin
                 // 丢弃本帧剩余数据, 直到 tlast 下降
+                tx_end_pending <= 1'b0;
                 if (!s_rmii_tx_axis_net.tlast) begin
                     tx_abort   <= 1'b0;
                     tx_ifg_cnt <= TX_IFG_CLKS;
@@ -150,12 +160,14 @@ module phy_rmii_axis(
                 tx_nib_cnt   <= 2'd0;
                 tx_buf_valid <= 1'b1;
                 rmii_txen    <= 1'b1;
+                tx_end_pending <= 1'b0;
             end else if (tx_buf_valid) begin
                 if (tx_nib_cnt == 2'd3) begin
                     tx_buf_valid <= 1'b0;
                     tx_nib_cnt   <= 2'd0;
                     tx_shift     <= 8'h0;
-                    if (!s_rmii_tx_axis_net.tlast) begin
+                    tx_end_pending <= 1'b0;
+                    if (tx_end_seen) begin
                         rmii_txen  <= 1'b0;
                         tx_ifg_cnt <= TX_IFG_CLKS;
                     end else begin
@@ -166,7 +178,11 @@ module phy_rmii_axis(
                 end else begin
                     tx_shift   <= {2'b00, tx_shift[7:2]};
                     tx_nib_cnt <= tx_nib_cnt + 2'd1;
+                    if (!s_rmii_tx_axis_net.tlast)
+                        tx_end_pending <= 1'b1;
                 end
+            end else begin
+                tx_end_pending <= 1'b0;
             end
         end
     end
