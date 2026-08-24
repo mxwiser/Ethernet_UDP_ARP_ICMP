@@ -83,8 +83,14 @@ module phy_mii_axis(
     logic [7:0] tx_shift;
     logic [7:0] tx_ifg_cnt;
     logic       tx_abort;
+    logic       tx_end_pending;
 
-    wire tx_can_accept = (tx_nib_cnt == 2'd1) || !tx_buf_valid;
+    // tlast is frame-level. Remember a falling edge until the byte currently
+    // being shifted has completely left MII, and block next-frame prefetch.
+    wire tx_end_seen = tx_end_pending ||
+                       (tx_buf_valid && !s_phy_tx.tlast);
+    wire tx_can_accept = !tx_end_seen &&
+                         ((tx_nib_cnt == 2'd1) || !tx_buf_valid);
     wire tx_accept = s_phy_tx.tvalid && s_phy_tx.tlast &&
                      (tx_ifg_cnt == 8'd0) && tx_can_accept;
 
@@ -99,12 +105,14 @@ module phy_mii_axis(
             tx_shift     <= 8'h0;
             tx_ifg_cnt   <= 8'd0;
             tx_abort     <= 1'b0;
+            tx_end_pending <= 1'b0;
         end else begin
             if (tx_ifg_cnt != 8'd0)
                 tx_ifg_cnt <= tx_ifg_cnt - 8'd1;
 
             if (tx_abort) begin
                 // 丢弃本帧剩余数据, 直到 tlast 下降
+                tx_end_pending <= 1'b0;
                 if (!s_phy_tx.tlast) begin
                     tx_abort   <= 1'b0;
                     tx_ifg_cnt <= TX_IFG_CLKS;
@@ -113,12 +121,14 @@ module phy_mii_axis(
                 tx_shift     <= s_phy_tx.tdata;
                 tx_nib_cnt   <= 2'd0;
                 tx_buf_valid <= 1'b1;
+                tx_end_pending <= 1'b0;
             end else if (tx_buf_valid) begin
                 if (tx_nib_cnt == 2'd1) begin
                     tx_buf_valid <= 1'b0;
                     tx_nib_cnt   <= 2'd0;
                     tx_shift     <= 8'h0;
-                    if (!s_phy_tx.tlast) begin
+                    tx_end_pending <= 1'b0;
+                    if (tx_end_seen) begin
                         tx_ifg_cnt <= TX_IFG_CLKS;
                     end else begin
                         // tvalid 断流, 帧已无法恢复, 中止发送
@@ -127,7 +137,11 @@ module phy_mii_axis(
                 end else begin
                     tx_shift   <= {4'b0, tx_shift[7:4]};
                     tx_nib_cnt <= tx_nib_cnt + 2'd1;
+                    if (!s_phy_tx.tlast)
+                        tx_end_pending <= 1'b1;
                 end
+            end else begin
+                tx_end_pending <= 1'b0;
             end
         end
     end

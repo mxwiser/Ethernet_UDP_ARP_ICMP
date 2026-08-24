@@ -23,6 +23,7 @@ module udp(
 	pc_head.master						udp_rx_head,
 
 	//txstart开始前需要确保pc_mac_addr，pc_ip_addr，pc_port，board_port稳定.
+	//tx比rx快时rx可能在txstart开始前会覆写mac ，要么在rxstart时把pc信息当作fifo储存下来.
 	input	wire						udp_txstart,
 	input	wire	[15:0]				udp_txamount,
 	input	wire	[7:0]				udp_txdata,

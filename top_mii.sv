@@ -12,8 +12,8 @@ module top_mii (
 
 	//smi   
 	output  logic  						phy_rst,
-	output  logic                       mdc,
-	inout   logic						mdio,
+	output  wire                        mdc,
+	inout   wire						mdio,
 	//MII
 	input   logic   					mii_rxdv,
 	input   logic	[3:0]				mii_rxd,
@@ -23,7 +23,27 @@ module top_mii (
 	input   logic   					mii_txc
 
 );
-    assign  phy_rst = rstn;
+	logic phy_rdy;
+	logic phy_full_duplex;
+
+	pll	pll_inst (
+		.inclk0 ( clk ),
+		.c0     ( mdc )
+	);
+
+	phy_smi_helper u_phy_smi_helper (
+		.clk								( clk		),
+		.rst								( rstn		),
+		.mdclk							    ( mdc		),
+		.phyrst							    ( phy_rst	),
+		.phy_rdy							( phy_rdy	),
+		.phy_full_duplex					( phy_full_duplex ),
+		.mdio								( mdio		)
+	);
+
+	assign led[0] = phy_rdy&phy_full_duplex;          
+	
+
 	wire								udp_rxstart;
 	wire								udp_rxend;
 	wire								udp_rxframe_done;
@@ -83,6 +103,7 @@ udp	u1_udp (
 udp_ring u_udp_ring (
 	.clk								( clk				),
 	.rstn								( rstn				),
+	.udp_rxstart						( udp_rxstart		),
 	.udp_rxframe_done					( udp_rxframe_done	),
 	.udp_rxdv							( udp_rxdv			),
 	.udp_rxdata							( udp_rxdata			),
@@ -97,14 +118,13 @@ udp_ring u_udp_ring (
 );
 
 //user test
-always @ ( posedge clk or negedge rstn ) begin
-	if ( !rstn ) begin
-		led <= 2'b0;
-	end else if ( udp_rxdv && ( udp_rxdata == 'hA1 ) ) begin
-		led <= ~led;
-	end
-end
-
+// always @ ( posedge clk or negedge rstn ) begin
+// 	if ( !rstn ) begin
+// 		led <= 2'b0;
+// 	end else if ( udp_rxdv && ( udp_rxdata == 'hA1 ) ) begin
+// 		led <= ~led;
+// 	end
+// end
 
 
 

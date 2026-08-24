@@ -113,6 +113,33 @@ eth_axis #(
 	wire									is_frag						= ( flags[12:0] != 13'd0 );		// 非首片分片: fragment offset != 0
 	reg		[15:0]							cnt_data;
 	reg		[15:0]							data_len;
+	reg									packet_candidate;
+	reg									ip_checksum_ok;
+	reg		[31:0]							ip_checksum_sum;
+	reg		[7:0]							ip_checksum_hi;
+	reg		[31:0]							rx_fcs;
+	reg		[31:0]							expected_fcs;
+	wire									udp_header_valid;
+	wire									crc_start;
+	wire									crc_en;
+	wire									crc_end;
+	wire	[31:0]							crc32_temp;
+	wire									crc32_valid;
+
+	function automatic [15:0] fold_checksum(input [31:0] sum);
+		reg [16:0] fold1;
+		reg [16:0] fold2;
+		begin
+			fold1 = {1'b0, sum[15:0]} + sum[31:16];
+			fold2 = {1'b0, fold1[15:0]} + fold1[16];
+			fold_checksum = {15'b0, fold2[16]} + fold2[15:0];
+		end
+	endfunction
+
+	assign udp_header_valid = (ip_header_len >= 6'd20) &&
+		(ip_len >= ({10'd0, ip_header_len} + 16'd8)) &&
+		(udp_len >= 16'd8) && (udp_len == data_len) &&
+		(des_ip == BOARD_IP_ADDR) && !is_frag && !flags[13] && ip_checksum_ok;
 
 
 
@@ -175,7 +202,7 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 			end
 			IP_TYPE: begin
 				if ( cnt_ip_type && s_mac_tvalid ) begin
-					if ( s_mac_tdata_d[7:4] == 'h4 ) begin						// IPv4 only
+					if ( s_mac_tdata_d[7:4] == 'h4 && s_mac_tdata_d[3:0] >= 4'd5 ) begin	// IPv4, valid IHL
 						state <= IP_LEN;
 					end else begin
 						state <= UDP_IDLE;
@@ -245,9 +272,9 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 				end
 			end
 			IP_ADDR: begin
-				if ( cnt_ip_addr >= 3'd7 && s_mac_tvalid && is_frag && cnt_network < ip_header_len - 1 ) begin
+				if ( cnt_ip_addr >= 3'd7 && s_mac_tvalid && cnt_network < ip_header_len - 1 ) begin
 					state <= IP_FILL;
-				end else if ( cnt_ip_addr >= 3'd7 && s_mac_tvalid && is_frag ) begin
+				end else if ( cnt_ip_addr >= 3'd7 && s_mac_tvalid && (is_frag || flags[13]) ) begin
 					state <= DATA;
 				end else if ( cnt_ip_addr >= 3'd7 && s_mac_tvalid ) begin
 					state <= UDP_PORT;
@@ -258,14 +285,14 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 				end
 			end
 			IP_FILL: begin
-				if ( cnt_network >= ip_header_len - 1 && s_mac_tvalid && is_frag ) begin
+				if ( cnt_network >= ip_header_len - 1 && s_mac_tvalid && (is_frag || flags[13]) ) begin
 					state <= DATA;
 				end else if ( cnt_network >= ip_header_len - 1 && s_mac_tvalid ) begin
 					state <= UDP_PORT;
 				end else if ( !s_mac_tlast ) begin								// frame ends, back to idle
 					state <= UDP_IDLE;
 				end else begin
-					state <= IP_ADDR;
+					state <= IP_FILL;
 				end
 			end
 			UDP_PORT: begin
@@ -713,7 +740,38 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		data_len <= 16'd0;
 	end else begin
-		data_len <= ip_len - ip_header_len;
+		if (ip_len >= {10'd0, ip_header_len}) begin
+			data_len <= ip_len - {10'd0, ip_header_len};
+		end else begin
+			data_len <= 16'd0;
+		end
+	end
+end
+
+// Accumulate the complete IPv4 header, including options.  A packet is not
+// offered to the user side unless the one's-complement sum is 16'hffff.
+always @ ( posedge sys_clk or negedge sys_rst_n ) begin
+	if ( !sys_rst_n ) begin
+		ip_checksum_sum <= 32'd0;
+		ip_checksum_hi <= 8'd0;
+		ip_checksum_ok <= 1'b0;
+	end else if (state == IP_TYPE && !cnt_ip_type && s_mac_tvalid) begin
+		ip_checksum_sum <= 32'd0;
+		ip_checksum_hi <= s_mac_tdata;
+		ip_checksum_ok <= 1'b0;
+	end else if (s_mac_tvalid && cnt_network < ip_header_len &&
+				 (state == IP_TYPE || state == IP_LEN || state == IP_ID ||
+				  state == IP_SPLIT || state == IP_TTL || state == IP_PROTOCOL ||
+				  state == IP_CHECK || state == IP_ADDR || state == IP_FILL)) begin
+		if (!cnt_network[0]) begin
+			ip_checksum_hi <= s_mac_tdata;
+		end else begin
+			ip_checksum_sum <= ip_checksum_sum + {16'd0, ip_checksum_hi, s_mac_tdata};
+			if (cnt_network == ip_header_len - 1'b1) begin
+				ip_checksum_ok <= (fold_checksum(ip_checksum_sum +
+					{16'd0, ip_checksum_hi, s_mac_tdata}) == 16'hffff);
+			end
+		end
 	end
 end
 
@@ -732,6 +790,56 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 end
 
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
+	if (!sys_rst_n) begin
+		packet_candidate <= 1'b0;
+	end else if (state == UDP_IDLE) begin
+		packet_candidate <= 1'b0;
+	end else if (state == UDP_CHECK && cnt_udp_check && s_mac_tvalid) begin
+		packet_candidate <= udp_header_valid;
+	end
+end
+
+assign crc_start = state == MAC_ADDR && cnt_mac_addr == 4'd0 && s_mac_tvalid;
+assign crc_en = s_mac_tvalid &&
+	(state == MAC_ADDR || state == UDP_TYPE || state == IP_TYPE ||
+	 state == IP_LEN || state == IP_ID || state == IP_SPLIT ||
+	 state == IP_TTL || state == IP_PROTOCOL || state == IP_CHECK ||
+	 state == IP_ADDR || state == IP_FILL || state == UDP_PORT ||
+	 state == UDP_LEN || state == UDP_CHECK || state == DATA);
+assign crc_end = state == DATA && cnt_data >= data_len - 16'd1 &&
+				 cnt_network >= 6'd45 && s_mac_tvalid;
+
+CRC32_D8 u_rx_crc32 (
+	.sys_clk(sys_clk),
+	.sys_rst_n(sys_rst_n),
+	.data(s_mac_tdata),
+	.crc_start(crc_start),
+	.crc_en(crc_en),
+	.crc_end(crc_end),
+	.crc32(crc32_temp),
+	.crc32_valid(crc32_valid)
+);
+
+always @ ( posedge sys_clk or negedge sys_rst_n ) begin
+	if (!sys_rst_n) begin
+		expected_fcs <= 32'd0;
+		rx_fcs <= 32'd0;
+	end else begin
+		if (crc32_valid) begin
+			expected_fcs <= crc32_temp;
+		end
+		if (state == UDP_CRC && s_mac_tvalid) begin
+			case (cnt_crc)
+				2'd0: rx_fcs[7:0] <= s_mac_tdata;
+				2'd1: rx_fcs[15:8] <= s_mac_tdata;
+				2'd2: rx_fcs[23:16] <= s_mac_tdata;
+				2'd3: rx_fcs[31:24] <= s_mac_tdata;
+			endcase
+		end
+	end
+end
+
+always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		cnt_crc <= 2'd0;
 	end else if ( state == UDP_CRC ) begin
@@ -745,7 +853,8 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	end
 end
 
-assign		pc_refresh		=	state == UDP_LEN && !cnt_udp_len && s_mac_tvalid;
+assign		pc_refresh		=	state == UDP_CHECK && cnt_udp_check &&
+								s_mac_tvalid && udp_header_valid;
 
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
@@ -779,7 +888,7 @@ end
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		udp_rxstart <= 1'b0;
-	end else if ( !is_frag && !flags[13] && state == DATA && cnt_data == 16'd8 && s_mac_tvalid ) begin
+	end else if ( state == UDP_CHECK && cnt_udp_check && s_mac_tvalid && udp_header_valid ) begin
 		udp_rxstart <= 1'b1;
 	end else begin
 		udp_rxstart <= 1'b0;
@@ -789,7 +898,8 @@ end
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		udp_rxend <= 1'b0;
-	end else if ( !is_frag && !flags[13] && state == DATA && cnt_data == data_len - 16'd1 && s_mac_tvalid ) begin
+	end else if ( packet_candidate && udp_len > 16'd8 && state == DATA &&
+				  cnt_data == udp_len - 16'd1 && s_mac_tvalid ) begin
 		udp_rxend <= 1'b1;
 	end else begin
 		udp_rxend <= 1'b0;
@@ -802,8 +912,8 @@ end
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		udp_rxframe_done <= 1'b0;
-	end else if ( !is_frag && !flags[13] && state == UDP_CRC &&
-				  cnt_crc >= 2'd3 && s_mac_tvalid ) begin
+	end else if ( packet_candidate && state == UDP_CRC && cnt_crc == 2'd3 &&
+				  s_mac_tvalid && {s_mac_tdata, rx_fcs[23:0]} == expected_fcs ) begin
 		udp_rxframe_done <= 1'b1;
 	end else begin
 		udp_rxframe_done <= 1'b0;
@@ -813,7 +923,8 @@ end
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		udp_rxdv <= 1'b0;
-	end else if ( state == DATA && s_mac_tvalid && !is_frag && !flags[13] && udp_rxnum < udp_len - 8 ) begin
+	end else if ( packet_candidate && state == DATA && s_mac_tvalid &&
+				  cnt_data >= 16'd8 && cnt_data < udp_len ) begin
 		udp_rxdv <= 1'b1;
 	end else begin
 		udp_rxdv <= 1'b0;
@@ -823,7 +934,7 @@ end
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		udp_rxamount <= 16'd0;
-	end else if ( state == UDP_CHECK ) begin
+	end else if ( state == UDP_CHECK && cnt_udp_check && s_mac_tvalid && udp_header_valid ) begin
 		udp_rxamount <= udp_len - 16'd8;
 	end else begin
 		udp_rxamount <= udp_rxamount;
@@ -835,9 +946,10 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 		udp_rxnum <= 16'd0;
 	end else if ( udp_rxstart ) begin
 		udp_rxnum <= 16'd1;
-	end else if ( state == UDP_CRC && udp_rxnum >= udp_len - 8 ) begin
+	end else if ( udp_rxframe_done || (state == UDP_IDLE && !s_mac_tvalid) ) begin
 		udp_rxnum <= 16'd0;
-	end else if ( state == DATA && s_mac_tvalid && udp_rxnum < udp_len - 8 ) begin
+	end else if ( packet_candidate && state == DATA && s_mac_tvalid &&
+				  cnt_data >= 16'd8 && cnt_data < udp_len ) begin
 		udp_rxnum <= udp_rxnum + 16'd1;
 	end else begin
 		udp_rxnum <= udp_rxnum;

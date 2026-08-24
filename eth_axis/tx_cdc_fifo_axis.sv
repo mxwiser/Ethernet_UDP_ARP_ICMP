@@ -141,7 +141,10 @@ always_ff@(posedge tx_clk or negedge rstn) begin
 			out_last  <= out_last;
 		end else begin
 			out_valid <= 1'b0;
-			out_last  <= 1'b0;
+			// FIFO read latency creates bubbles between bytes. tlast is a
+			// frame-level signal and must remain asserted across those bubbles;
+			// only the explicit marker above is allowed to end the frame.
+			out_last  <= in_frame;
 		end
 		// 空闲且本帧已结束后才允许切换通道: sys 优先
 		if (!in_frame && !rd_pending && cur_empty && !sys_empty) begin
@@ -156,5 +159,7 @@ assign phy_tx.tvalid = out_valid;
 assign phy_tx.tdata  = out_data;
 assign phy_tx.tlast  = out_last;
 assign phy_tx.tuser  = 1'b0;
+assign phy_tx.tkeep  = 1'b1;
+assign phy_tx.tstrb  = 1'b1;
 
 endmodule

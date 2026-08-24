@@ -41,7 +41,7 @@ set_global_assignment -name DEVICE EP4CE10F17C8
 set_global_assignment -name TOP_LEVEL_ENTITY top_mii
 set_global_assignment -name ORIGINAL_QUARTUS_VERSION 18.1.0
 set_global_assignment -name PROJECT_CREATION_TIME_DATE "11:33:31  JULY 06, 2026"
-set_global_assignment -name LAST_QUARTUS_VERSION "25.1std.0 Lite Edition"
+set_global_assignment -name LAST_QUARTUS_VERSION "25.1std.0 SP0.02std Lite Edition"
 set_global_assignment -name PROJECT_OUTPUT_DIRECTORY output_files
 set_global_assignment -name MIN_CORE_JUNCTION_TEMP 0
 set_global_assignment -name MAX_CORE_JUNCTION_TEMP 85
@@ -101,7 +101,6 @@ set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/phy_rmii_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/phy_mii_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/tx_cdc_fifo_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/rx_cdc_fifo_axis.sv
-set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/dcfifo.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/eth_axis.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/udp.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/udp_axis_tx.sv
@@ -133,4 +132,6 @@ set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to rstn
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to mdc
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to mdio
 set_instance_assignment -name IO_STANDARD "3.3-V LVCMOS" -to phy_rst
+set_global_assignment -name QIP_FILE pll/pll.qip
+
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Topset
