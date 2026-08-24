@@ -23,15 +23,36 @@ module rx_cdc_fifo_axis(
     logic        out_valid;
     logic [7:0]  out_data;
     logic        out_last;
+    logic        frame_level_d;
+    logic        end_pending;
+    wire         frame_end_seen = frame_level_d && !s_rx.tlast;
+    wire         write_end = end_pending || frame_end_seen;
+    wire         fifo_wrreq = !wr_full && (write_end || s_rx.tvalid);
+    wire [8:0]   fifo_wrdata = write_end ? 9'h100 : {1'b0, s_rx.tdata};
 
 // ================================ 写侧: rx_clk 域 ================================
-    assign s_rx.tready = !wr_full;
+    // End-of-frame is a falling tlast edge with tvalid already low.  Store an
+    // explicit marker so the edge is not lost while crossing clock domains.
+    assign s_rx.tready = !wr_full && !write_end;
+
+    always_ff @(posedge rx_clk or negedge rstn) begin
+        if (!rstn) begin
+            frame_level_d <= 1'b0;
+            end_pending <= 1'b0;
+        end else begin
+            frame_level_d <= s_rx.tlast;
+            if (write_end && wr_full)
+                end_pending <= 1'b1;
+            else if (write_end && !wr_full)
+                end_pending <= 1'b0;
+        end
+    end
 
 
     user_dc_fifo_9b_1024d rx_user_dc_fifo_9b_1024d (
         .wrclk   (rx_clk),
-        .wrreq   (s_rx.tvalid && !wr_full),
-        .data    ({s_rx.tlast, s_rx.tdata}),
+        .wrreq   (fifo_wrreq),
+        .data    (fifo_wrdata),
         .wrfull  (wr_full),
         .rdclk   (clk),
         .rdreq   (rd_req),
@@ -55,9 +76,14 @@ module rx_cdc_fifo_axis(
         end else begin
             rd_pending <= rd_req;
             if (rd_pending) begin
-                out_valid <= 1'b1;
-                out_data  <= rd_q[7:0];
-                out_last  <= rd_q[8];
+                if (rd_q[8]) begin
+                    out_valid <= 1'b0;
+                    out_last  <= 1'b0;
+                end else begin
+                    out_valid <= 1'b1;
+                    out_data  <= rd_q[7:0];
+                    out_last  <= 1'b1;
+                end
             end else if (out_valid && !m_rx.tready) begin
                 out_valid <= out_valid;
             end else begin
@@ -70,5 +96,7 @@ module rx_cdc_fifo_axis(
     assign m_rx.tdata  = out_data;
     assign m_rx.tlast  = out_last;
     assign m_rx.tuser  = 1'b0;
+    assign m_rx.tkeep  = 1'b1;
+    assign m_rx.tstrb  = 1'b1;
 
 endmodule

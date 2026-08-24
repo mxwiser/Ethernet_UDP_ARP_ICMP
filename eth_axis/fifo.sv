@@ -12,7 +12,7 @@ module fifo #(
     input  wire                  rdreq,
     output wire                  empty,
     output wire                  full,
-    output wire  [DATA_WIDTH-1:0] q
+    output logic [DATA_WIDTH-1:0] q
 );
 
 

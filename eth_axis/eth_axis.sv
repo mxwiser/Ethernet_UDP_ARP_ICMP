@@ -56,6 +56,8 @@ module eth_axis (
 	assign		m_axis_tx.tvalid	=	txen;
 	assign		m_axis_tx.tlast	=	txen;					// frame-level: high in frame, falling edge = frame end
 	assign		m_axis_tx.tuser	=	1'b0;
+	assign		m_axis_tx.tkeep	=	1'b1;
+	assign		m_axis_tx.tstrb	=	1'b1;
 	assign		m_axis_tx.tdata	=	txdata;
 // ================================ ARP part (from eth_arp_gmii.v) ================================
 	localparam		IDLE					= 28'h0_0001,
@@ -1011,7 +1013,8 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		icmp_payload_len <= 16'd0;
 	end else if ( rx_state == ICMP_SEQ && rx_cnt_icmp_seq == 2'd1 && s_mac_tvalid ) begin
-		icmp_payload_len <= ( ip_total_len >= ( ip_header_len + 8 ) ) ? ( ip_total_len - ip_header_len - 8 ) : 16'd0;
+		icmp_payload_len <= ( ip_total_len >= ( {10'd0, ip_header_len} + 16'd8 ) ) ?
+			( ip_total_len - {10'd0, ip_header_len} - 16'd8 ) : 16'd0;
 	end else begin
 		icmp_payload_len <= icmp_payload_len;
 	end
@@ -1238,6 +1241,9 @@ end
 	wire								tx_handshake		= txen && m_axis_tx.tready;
 	wire	[10:0]						tx_frame_max		= tx_is_icmp ? ( 11'd53 + tx_icmp_len ) : 11'd71;	// last byte of the frame (ARP padded to 60B min)
 	wire	[10:0]						tx_data_end			= tx_is_icmp ? ( 11'd49 + tx_icmp_len ) : 11'd67;	// last byte covered by CRC (ARP padding included)
+	wire								tx_crc_start;
+	wire								tx_crc_en;
+	wire								tx_crc_end;
 
 	function [7:0] arp_reply_byte( input [10:0] cnt );						// byte selection of the ARP reply frame
 		if ( cnt <= 7'd6 ) begin											// preamble 0x55 x7
@@ -1282,6 +1288,14 @@ end
 	reg		[19:0]							icmp_sum_f1;		// stage 3: fold
 	reg		[15:0]							icmp_sum_f2;		// stage 4: fold, final value
 
+	function automatic [15:0] fold_sum20(input [19:0] sum);
+		reg [16:0] folded;
+		begin
+			folded = {1'b0, sum[15:0]} + sum[19:16];
+			fold_sum20 = folded[15:0] + folded[16];
+		end
+	endfunction
+
 always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 	if ( !sys_rst_n ) begin
 		icmp_cks_stage	<= 3'd0;
@@ -1300,7 +1314,7 @@ always @ ( posedge sys_clk or negedge sys_rst_n ) begin
 		icmp_sum_f1		<= {4'b0, icmp_sum[15:0]} + {16'b0, icmp_sum[19:16]};
 	end else if ( icmp_cks_stage == 3'd3 ) begin
 		icmp_cks_stage	<= 3'd4;
-		icmp_sum_f2		<= {4'b0, icmp_sum_f1[15:0]} + {16'b0, icmp_sum_f1[19:16]};
+		icmp_sum_f2		<= fold_sum20(icmp_sum_f1);
 	end else if ( icmp_cks_stage == 3'd4 ) begin
 		icmp_cks_stage	<= tx_start ? 3'd0 : 3'd4;				// 校验和就绪, 等待 TX 空闲后启动
 	end else begin

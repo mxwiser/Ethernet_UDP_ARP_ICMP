@@ -51,6 +51,8 @@ module phy_mii_axis(
     assign m_phy_rx.tvalid = rx_in_frame && (rx_nib_cnt == 2'd1);
     assign m_phy_rx.tdata  = rx_shift;
     assign m_phy_rx.tuser  = 1'b0;
+    assign m_phy_rx.tkeep  = 1'b1;
+    assign m_phy_rx.tstrb  = 1'b1;
 
     always_ff @(posedge rx_clk or negedge rstn) begin
         if (!rstn) begin

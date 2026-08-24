@@ -61,6 +61,8 @@ module phy_rmii_axis(
     assign m_rmii_rx_axis_net.tvalid = rx_in_frame && (rx_nib_cnt == 2'd3);
     assign m_rmii_rx_axis_net.tdata  = rx_shift;
     assign m_rmii_rx_axis_net.tuser  = 1'b0;
+    assign m_rmii_rx_axis_net.tkeep  = 1'b1;
+    assign m_rmii_rx_axis_net.tstrb  = 1'b1;
 
     always_ff @(posedge rmii_clk or negedge rstn) begin
         if (!rstn) begin

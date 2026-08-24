@@ -58,7 +58,7 @@ always_comb begin
     crc_end    = 1'b0;
 
     if (udp_rxdv) begin
-        if (udp_rxstart) begin
+        if (udp_rxstart || (receiving && byte_index == 0)) begin
             crc_start  = 1'b1;
             crc_enable = 1'b1;
         end else if (receiving) begin
@@ -96,10 +96,10 @@ always_ff @(posedge clk or negedge rstn) begin
     end else begin
         command_valid <= 1'b0;
 
-        if (udp_rxstart && udp_rxdv) begin
+        if (udp_rxstart) begin
             receiving      <= 1'b1;
-            byte_index     <= 5'd1;
-            frame_header   <= udp_rxdata;
+            byte_index     <= udp_rxdv ? 5'd1 : 5'd0;
+            frame_header   <= udp_rxdv ? udp_rxdata : 8'd0;
             function_code  <= '0;
             start_valve    <= '0;
             end_valve      <= '0;
@@ -112,6 +112,7 @@ always_ff @(posedge clk or negedge rstn) begin
             byte_index <= byte_index + 1'b1;
 
             case (byte_index)
+                5'd0: frame_header <= udp_rxdata;
                 5'd1: function_code <= udp_rxdata;
 
                 5'd2: begin
