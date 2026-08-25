@@ -23,6 +23,7 @@ wire        command_fifo_full;
 wire [63:0] command_fifo_data;
 wire        command_fifo_read;
 wire        controller_command_ready;
+wire        scheduler_reset_pulse;
 
 wire        pwm_s1_wr_en;
 wire [5:0]  pwm_s1_wr_addr;
@@ -32,11 +33,28 @@ wire [5:0]  pwm_s2_wr_addr;
 wire [3:0]  pwm_s2_wr_duty;
 wire [63:0] valve_open_status;
 
-// The command parser validates one complete UDP payload before placing it
-// into the FIFO. If the FIFO is full at that instant, the command is dropped.
-udp_command_parser u_udp_command_parser (
+// Reset is decoded on an independent lane so it cannot be hidden behind an
+// OPEN command when the scheduler or the normal command FIFO is full.
+udp_scheduler_reset_detector u_udp_scheduler_reset_detector (
     .clk              (clk),
     .rstn             (rstn),
+    .udp_rxstart      (udp_rxstart),
+    .udp_rxend        (udp_rxend),
+    .udp_rxframe_done (udp_rxframe_done),
+    .udp_rxdv         (udp_rxdv),
+    .udp_rxdata       (udp_rxdata),
+    .udp_rxamount     (udp_rxamount),
+    .reset_pulse      (scheduler_reset_pulse)
+);
+
+// Function 0x01 packets are validated atomically, then their 1..100 command
+// records are streamed into a FIFO large enough to hold one complete packet.
+udp_command_parser #(
+    .MAX_COMMANDS (100)
+) u_udp_command_parser (
+    .clk              (clk),
+    .rstn             (rstn),
+    .clear            (scheduler_reset_pulse),
     .udp_rxstart      (udp_rxstart),
     .udp_rxend        (udp_rxend),
     .udp_rxframe_done (udp_rxframe_done),
@@ -50,10 +68,11 @@ udp_command_parser u_udp_command_parser (
 
 command_fifo #(
     .DATA_WIDTH (64),
-    .DEPTH      (16)
+    .DEPTH      (128)
 ) u_command_fifo (
     .clk     (clk),
     .rstn    (rstn),
+    .clear   (scheduler_reset_pulse),
     .wr_en   (parser_command_valid),
     .wr_data (parser_command_data),
     .rd_en   (command_fifo_read),
@@ -68,10 +87,12 @@ valve_controller #(
     .CLK_FREQ_HZ (SYS_CLK_FREQ_HZ),
     .TIMER_HZ    (10_000),
     .VALVE_COUNT (64),
-    .PWM_LEVELS  (10)
+    .PWM_LEVELS  (10),
+    .SCHEDULE_DEPTH (1024)
 ) u_valve_controller (
     .clk              (clk),
     .rstn             (rstn),
+    .scheduler_reset  (scheduler_reset_pulse),
     .command_valid    (command_fifo_read),
     .command_data     (command_fifo_data),
     .command_ready    (controller_command_ready),

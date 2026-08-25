@@ -126,7 +126,9 @@ set_global_assignment -name SYSTEMVERILOG_FILE user_logic/ip_conf.sv
 set_global_assignment -name SYSTEMVERILOG_FILE eth_axis/tx_cdc_fifo_axis.sv
 set_global_assignment -name SOURCE_FILE user_logic/hc595.svh
 set_global_assignment -name SYSTEMVERILOG_FILE user_logic/command_fifo.sv
+set_global_assignment -name SYSTEMVERILOG_FILE user_logic/udp_scheduler_reset_detector.sv
 set_global_assignment -name SYSTEMVERILOG_FILE user_logic/udp_command_parser.sv
+set_global_assignment -name SYSTEMVERILOG_FILE user_logic/valve_schedule_table.sv
 set_global_assignment -name SYSTEMVERILOG_FILE user_logic/valve_controller.sv
 set_global_assignment -name SYSTEMVERILOG_FILE user_logic/udp_cmd_process.sv
 set_global_assignment -name SYSTEMVERILOG_FILE user_logic/HC595PWM.sv
@@ -158,5 +160,7 @@ set_location_assignment PIN_135 -to hc595_led.oen
 set_global_assignment -name QIP_FILE pll/pll.qip
 set_location_assignment PIN_23 -to clkin
 set_global_assignment -name POST_FLOW_SCRIPT_FILE "quartus_sh:fix_supra_pin.tcl"
+
+
 
 set_instance_assignment -name PARTITION_HIERARCHY root_partition -to | -section_id Topset

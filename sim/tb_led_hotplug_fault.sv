@@ -42,10 +42,12 @@ valve_controller #(
     .CLK_FREQ_HZ (1_000),
     .TIMER_HZ    (1),
     .VALVE_COUNT (64),
-    .PWM_LEVELS  (10)
+    .PWM_LEVELS  (10),
+    .SCHEDULE_DEPTH (256)
 ) u_valve_controller (
     .clk              (clk),
     .rstn             (rstn),
+    .scheduler_reset  (1'b0),
     .command_valid    (command_valid),
     .command_data     (command_data),
     .command_ready    (command_ready),
@@ -99,7 +101,9 @@ initial begin
     #1;
 
     // Exercise one real work/stop cycle before injecting the disturbance.
-    send_command({2'd1, 6'd3, 6'd3, 16'd0, 16'd1, 18'd0});
+    send_command({
+        2'd1, 6'd3, 6'd3, 16'd0, 16'd1, 1'b1, 17'd0
+    });
     wait (valve_open_status[3]);
     wait (!valve_open_status[3]);
     wait ((u_hc595_led.state == 2'd3) &&

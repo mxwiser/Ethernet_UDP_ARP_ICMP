@@ -1,11 +1,13 @@
 module valve_controller #(
-    parameter integer CLK_FREQ_HZ = 50_000_000,
-    parameter integer TIMER_HZ    = 10_000,
-    parameter integer VALVE_COUNT = 64,
-    parameter integer PWM_LEVELS  = 10
+    parameter integer CLK_FREQ_HZ   = 50_000_000,
+    parameter integer TIMER_HZ      = 10_000,
+    parameter integer VALVE_COUNT   = 64,
+    parameter integer PWM_LEVELS    = 10,
+    parameter integer SCHEDULE_DEPTH = 1024
 )(
     input  wire         clk,
     input  wire         rstn,
+    input  wire         scheduler_reset,
 
     input  wire         command_valid,
     input  wire [63:0]  command_data,
@@ -24,111 +26,180 @@ module valve_controller #(
 
 localparam logic [1:0] COMMAND_OPEN = 2'd1;
 localparam logic [1:0] COMMAND_SET  = 2'd2;
+localparam logic [1:0] COMMAND_RESET = 2'd3;
 localparam integer TIMER_CYCLES = CLK_FREQ_HZ / TIMER_HZ;
 localparam integer TIMER_COUNT_WIDTH =
     (TIMER_CYCLES <= 1) ? 1 : $clog2(TIMER_CYCLES);
-localparam integer TIME_WIDTH = 20;
-localparam integer STATE_WIDTH = 57;
-
 localparam logic [3:0] FULL_DUTY = 4'd10;
 
-localparam logic [3:0] STATE_INITIALIZE    = 4'd0;
-localparam logic [3:0] STATE_IDLE          = 4'd1;
-localparam logic [3:0] STATE_APPLY_WAIT    = 4'd2;
-localparam logic [3:0] STATE_APPLY_PROCESS = 4'd3;
-localparam logic [3:0] STATE_TIMER_WAIT    = 4'd4;
-localparam logic [3:0] STATE_TIMER_PROCESS = 4'd5;
-localparam logic [3:0] STATE_SET_WAIT      = 4'd6;
-localparam logic [3:0] STATE_SET_PROCESS   = 4'd7;
-localparam logic [3:0] STATE_PWM_SECOND    = 4'd8;
+localparam logic [3:0] STATE_INITIALIZE       = 4'd0;
+localparam logic [3:0] STATE_IDLE             = 4'd1;
+localparam logic [3:0] STATE_SCHEDULE_WAIT    = 4'd2;
+localparam logic [3:0] STATE_SCHEDULE_PROCESS = 4'd3;
+localparam logic [3:0] STATE_VALVE_WAIT       = 4'd4;
+localparam logic [3:0] STATE_VALVE_PROCESS    = 4'd5;
+localparam logic [3:0] STATE_SET_WAIT         = 4'd6;
+localparam logic [3:0] STATE_SET_PROCESS      = 4'd7;
+localparam logic [3:0] STATE_PWM_SECOND       = 4'd8;
 
 wire [1:0]  command_opcode  = command_data[63:62];
 wire [5:0]  command_start   = command_data[61:56];
 wire [5:0]  command_end     = command_data[55:50];
 wire [15:0] command_param_0 = command_data[49:34];
 wire [15:0] command_param_1 = command_data[33:18];
+wire        command_batch_last = command_data[17];
+wire [7:0]  command_packet_count_field = command_data[16:9];
+wire [31:0] command_packet_count =
+    (command_packet_count_field == 0) ?
+        32'd1 : {24'd0, command_packet_count_field};
 
-wire [TIME_WIDTH-1:0] command_param_0_extended =
-    {{(TIME_WIDTH-16){1'b0}}, command_param_0};
-wire [TIME_WIDTH-1:0] command_param_1_extended =
-    {{(TIME_WIDTH-16){1'b0}}, command_param_1};
-wire [TIME_WIDTH-1:0] command_delay_ticks =
-    (command_param_0_extended << 3) + (command_param_0_extended << 1);
-wire [TIME_WIDTH-1:0] command_duration_ticks =
-    (command_param_1_extended << 3) + (command_param_1_extended << 1);
+wire [31:0] command_delay_ticks =
+    ({16'd0, command_param_0} << 3) +
+    ({16'd0, command_param_0} << 1);
+wire [31:0] command_duration_ticks =
+    ({16'd0, command_param_1} << 3) +
+    ({16'd0, command_param_1} << 1);
 
 logic [3:0] fsm_state;
 logic [TIMER_COUNT_WIDTH-1:0] timer_divider;
 logic                         timer_pending;
-
-logic [5:0]            work_index;
-logic [5:0]            work_end;
-logic [TIME_WIDTH-1:0] apply_delay_ticks;
-logic [TIME_WIDTH-1:0] apply_duration_ticks;
+logic [31:0]                  current_time;
+logic [31:0]                  scan_time;
+logic                         scan_advances_time;
 
 logic [15:0] boost_time_setting;
 logic [3:0]  hold_duty_setting;
 
-// One packed state word per valve:
-// [56] open, [55:36] delay remaining (0.1 ms),
-// [35:16] open time remaining (0.1 ms), [15:0] boost elapsed (0.1 ms).
-// A synchronous RAM avoids building a large variable-index multiplexer from
-// thousands of individual timer registers.
-(* ramstyle = "M9K" *) logic [STATE_WIDTH-1:0]
+logic schedule_scan_start;
+wire  schedule_scan_busy;
+wire  schedule_scan_done;
+wire  schedule_append_ready;
+wire  schedule_full;
+wire  [VALVE_COUNT-1:0] schedule_active_mask;
+wire  [$clog2(SCHEDULE_DEPTH+1)-1:0] schedule_active_count;
+
+logic        batch_active;
+logic [31:0] batch_epoch;
+logic        drop_batch;
+logic [31:0] rejected_packet_count;
+logic        schedule_refresh_pending;
+wire [31:0] command_epoch = batch_active ? batch_epoch : current_time;
+wire [31:0] command_start_time = command_epoch + command_delay_ticks;
+wire [31:0] command_end_time =
+    command_start_time + command_duration_ticks;
+wire command_accepted =
+    (fsm_state == STATE_IDLE) && command_valid && command_ready;
+wire schedule_clear =
+    scheduler_reset ||
+    (command_accepted && (command_opcode == COMMAND_RESET));
+wire [31:0] schedule_count_extended = schedule_active_count;
+wire open_packet_fits =
+    (schedule_count_extended + command_packet_count <= SCHEDULE_DEPTH);
+wire open_command_will_append =
+    (command_opcode == COMMAND_OPEN) && !drop_batch &&
+    (batch_active || open_packet_fits);
+
+logic [VALVE_COUNT-1:0] desired_open_status;
+
+logic [5:0] work_index;
+
+// Boost elapsed time remains one small RAM entry per valve. Scheduling is
+// kept separately so one valve can own multiple disjoint future intervals.
+(* ramstyle = "M9K" *) logic [15:0]
     valve_state_memory [0:VALVE_COUNT-1];
-logic [5:0]                 memory_read_address;
-logic [STATE_WIDTH-1:0]     memory_read_data;
-logic                       memory_write_enable;
-logic [5:0]                 memory_write_address;
-logic [STATE_WIDTH-1:0]     memory_write_data;
+logic [15:0] valve_read_data;
+logic        valve_write_enable;
+logic [5:0]  valve_write_address;
+logic [15:0] valve_write_data;
 
-wire                        state_open      = memory_read_data[56];
-wire [TIME_WIDTH-1:0]       state_delay     = memory_read_data[55:36];
-wire [TIME_WIDTH-1:0]       state_remaining = memory_read_data[35:16];
-wire [15:0]                 state_boost     = memory_read_data[15:0];
-wire [15:0]                 next_boost =
-    (state_boost == 16'hFFFF) ? 16'hFFFF : state_boost + 1'b1;
+wire desired_open = desired_open_status[work_index];
+wire valve_is_open = valve_open_status[work_index];
+wire [15:0] state_boost = valve_read_data;
+wire [15:0] next_boost =
+    (state_boost == 16'hffff) ? 16'hffff : state_boost + 1'b1;
 
-wire apply_overwrites = apply_duration_ticks > state_remaining;
-wire apply_starts_now = (fsm_state == STATE_APPLY_PROCESS) &&
-                        apply_overwrites && !state_open &&
-                        (apply_delay_ticks == 0);
-wire timer_closes = (fsm_state == STATE_TIMER_PROCESS) &&
-                    state_open && (state_remaining <= 1);
-wire timer_opens = (fsm_state == STATE_TIMER_PROCESS) &&
-                   !state_open && (state_delay == 1);
-wire timer_leaves_boost = (fsm_state == STATE_TIMER_PROCESS) &&
-                          state_open && (state_remaining > 1) &&
+wire valve_opens = (fsm_state == STATE_VALVE_PROCESS) &&
+                   desired_open && !valve_is_open;
+wire valve_closes = (fsm_state == STATE_VALVE_PROCESS) &&
+                    !desired_open && valve_is_open;
+wire valve_leaves_boost = (fsm_state == STATE_VALVE_PROCESS) &&
+                          desired_open && valve_is_open &&
                           (state_boost < boost_time_setting) &&
                           (next_boost >= boost_time_setting);
 
 logic       second_pwm_is_b;
 logic [3:0] second_pwm_duty;
-logic       second_return_to_apply;
 
 logic       pwm_write_enable;
 logic [5:0] pwm_write_valve;
 logic       pwm_write_is_b;
 logic [3:0] pwm_write_duty;
 
-assign command_ready = (fsm_state == STATE_IDLE) && !timer_pending;
-assign memory_read_address = work_index;
+assign command_ready =
+    (fsm_state == STATE_IDLE) &&
+    (!timer_pending || batch_active || drop_batch) &&
+    (!schedule_refresh_pending || batch_active || drop_batch) &&
+    ((command_opcode == COMMAND_SET) ||
+     (command_opcode == COMMAND_RESET) ||
+     drop_batch ||
+     ((command_opcode == COMMAND_OPEN) &&
+      (!batch_active && !open_packet_fits)) ||
+     schedule_append_ready);
+
+valve_schedule_table #(
+    .SCHEDULE_DEPTH (SCHEDULE_DEPTH),
+    .VALVE_COUNT    (VALVE_COUNT)
+) u_schedule_table (
+    .clk                (clk),
+    .rstn               (rstn),
+    .clear              (schedule_clear),
+    .append_valid       (command_accepted && open_command_will_append),
+    .append_ready       (schedule_append_ready),
+    .append_start_valve (command_start),
+    .append_end_valve   (command_end),
+    .append_start_time  (command_start_time),
+    .append_end_time    (command_end_time),
+    .scan_start         (schedule_scan_start),
+    .scan_time          (scan_time),
+    .scan_busy          (schedule_scan_busy),
+    .scan_done          (schedule_scan_done),
+    .active_valve_mask  (schedule_active_mask),
+    .full               (schedule_full),
+    .active_count       (schedule_active_count)
+);
+
+always_ff @(posedge clk) begin
+    valve_read_data <= valve_state_memory[work_index];
+    if (valve_write_enable)
+        valve_state_memory[valve_write_address] <= valve_write_data;
+end
+
+always_comb begin
+    valve_write_enable  = 1'b0;
+    valve_write_address = work_index;
+    valve_write_data    = valve_read_data;
+
+    if (fsm_state == STATE_INITIALIZE) begin
+        valve_write_enable = 1'b1;
+        valve_write_data   = 16'd0;
+    end else if (fsm_state == STATE_VALVE_PROCESS) begin
+        if (valve_opens || valve_closes) begin
+            valve_write_enable = 1'b1;
+            valve_write_data   = 16'd0;
+        end else if (desired_open && valve_is_open) begin
+            valve_write_enable = 1'b1;
+            valve_write_data   = next_boost;
+        end
+    end
+end
 
 // --------------------------------------------------------------------------
 // PCB mapping section
 // --------------------------------------------------------------------------
-// 用户层阀门编号按照 PCB 上从右向左的物理顺序排列：
-//   0～31  -> 右侧 S1 的 8 片 74HC595
-//   32～63 -> 左侧 S2 的 8 片 74HC595
-// 每一串的芯片以及每片芯片上的 c0～c3 均从右向左排列。
-// HC595PWM 通道 0 对应最右侧第一片芯片的 QA，通道 8 对应下一片的 QA。
-//
-// 每片 74HC595 的 PCB 接线：
-//                  c0       c1       c2       c3
-//   反向电动势 A： Q0       Q4       Q3       Q7
-//   PWM 控制 B：   Q1       Q2       Q5       Q6
+// User valves 0..31 use S1 and valves 32..63 use S2. Each group contains
+// eight 74HC595 devices. The A/B channel wiring within each device is fixed
+// by the PCB layout below.
 function automatic logic map_valve_to_group(input logic [5:0] valve_number);
-    // 编号 0～31 选择 S1，编号 32～63 选择 S2。
     map_valve_to_group = valve_number[5];
 endfunction
 
@@ -138,12 +209,11 @@ function automatic [5:0] map_valve_to_a_channel(
     logic [2:0] q_index;
     begin
         case (valve_number[1:0])
-            2'd0: q_index = 3'd0; // c0 A -> Q0
-            2'd1: q_index = 3'd4; // c1 A -> Q4
-            2'd2: q_index = 3'd3; // c2 A -> Q3
-            default: q_index = 3'd7; // c3 A -> Q7
+            2'd0: q_index = 3'd0;
+            2'd1: q_index = 3'd4;
+            2'd2: q_index = 3'd3;
+            default: q_index = 3'd7;
         endcase
-
         map_valve_to_a_channel = {valve_number[4:2], q_index};
     end
 endfunction
@@ -154,122 +224,35 @@ function automatic [5:0] map_valve_to_b_channel(
     logic [2:0] q_index;
     begin
         case (valve_number[1:0])
-            2'd0: q_index = 3'd1; // c0 B -> Q1
-            2'd1: q_index = 3'd2; // c1 B -> Q2
-            2'd2: q_index = 3'd5; // c2 B -> Q5
-            default: q_index = 3'd6; // c3 B -> Q6
+            2'd0: q_index = 3'd1;
+            2'd1: q_index = 3'd2;
+            2'd2: q_index = 3'd5;
+            default: q_index = 3'd6;
         endcase
-
         map_valve_to_b_channel = {valve_number[4:2], q_index};
     end
 endfunction
 
-// Infer one synchronous-read, synchronous-write memory. It is explicitly
-// cleared by STATE_INITIALIZE after reset, because resetting every RAM bit
-// asynchronously would force the timers back into logic cells.
-always_ff @(posedge clk) begin
-    memory_read_data <= valve_state_memory[memory_read_address];
-    if (memory_write_enable)
-        valve_state_memory[memory_write_address] <= memory_write_data;
-end
-
-always_comb begin
-    memory_write_enable  = 1'b0;
-    memory_write_address = work_index;
-    memory_write_data    = memory_read_data;
-
-    case (fsm_state)
-        STATE_INITIALIZE: begin
-            memory_write_enable = 1'b1;
-            memory_write_data   = '0;
-        end
-
-        STATE_APPLY_PROCESS: begin
-            if (apply_overwrites) begin
-                memory_write_enable = 1'b1;
-                if (state_open) begin
-                    // An open valve ignores the new delay and keeps its
-                    // present boost phase; only the final close is extended.
-                    memory_write_data = {
-                        1'b1,
-                        {TIME_WIDTH{1'b0}},
-                        apply_duration_ticks,
-                        state_boost
-                    };
-                end else begin
-                    memory_write_data = {
-                        (apply_delay_ticks == 0),
-                        apply_delay_ticks,
-                        apply_duration_ticks,
-                        16'd0
-                    };
-                end
-            end
-        end
-
-        STATE_TIMER_PROCESS:begin 
-            if (state_open) begin 
-                memory_write_enable = 1'b1;
-                if (state_remaining <= 1) begin
-                    memory_write_data = '0;
-                end else begin
-                    memory_write_data = {
-                        1'b1,
-                        {TIME_WIDTH{1'b0}},
-                        state_remaining - 1'b1,
-                        next_boost
-                    };
-                end
-            end else if (state_delay != 0) begin
-                memory_write_enable = 1'b1;
-                if (state_delay == 1) begin
-                    memory_write_data = {
-                        1'b1,
-                        {TIME_WIDTH{1'b0}},
-                        state_remaining,
-                        16'd0
-                    };
-                end else begin
-                    memory_write_data = {
-                        1'b0,
-                        state_delay - 1'b1,
-                        state_remaining,
-                        16'd0
-                    };
-                end
-            end
-        end
-
-        default: begin
-        end
-    endcase
-end
-
-// 把一次“逻辑阀门写入”转换成对应595组的PWM写端口。
 always_comb begin
     pwm_write_enable = 1'b0;
     pwm_write_valve  = work_index;
     pwm_write_is_b   = 1'b0;
     pwm_write_duty   = 4'd0;
 
-    if (apply_starts_now) begin
+    if (valve_opens) begin
         // Turn A on before writing B.
         pwm_write_enable = 1'b1;
         pwm_write_duty   = FULL_DUTY;
-    end else if (timer_opens) begin
-        // Turn A on before writing B.
-        pwm_write_enable = 1'b1;
-        pwm_write_duty   = FULL_DUTY;
-    end else if (timer_closes) begin
+    end else if (valve_closes) begin
         // Stop PWM before turning the flyback-control output A off.
         pwm_write_enable = 1'b1;
         pwm_write_is_b   = 1'b1;
         pwm_write_duty   = 4'd0;
-    end else if (timer_leaves_boost) begin
+    end else if (valve_leaves_boost) begin
         pwm_write_enable = 1'b1;
         pwm_write_is_b   = 1'b1;
         pwm_write_duty   = hold_duty_setting;
-    end else if ((fsm_state == STATE_SET_PROCESS) && state_open) begin
+    end else if ((fsm_state == STATE_SET_PROCESS) && valve_is_open) begin
         pwm_write_enable = 1'b1;
         pwm_write_is_b   = 1'b1;
         if (state_boost < boost_time_setting)
@@ -290,17 +273,14 @@ always_comb begin
     pwm_s2_wr_duty = pwm_write_duty;
 
     if (pwm_write_enable) begin
-        // map_valve_to_group返回0时写hc595_s1，返回1时写hc595_s2。
         if (!map_valve_to_group(pwm_write_valve)) begin
             pwm_s1_wr_en = 1'b1;
-            // pwm_write_is_b=1表示写B端，否则写A端。
             if (pwm_write_is_b)
                 pwm_s1_wr_addr = map_valve_to_b_channel(pwm_write_valve);
             else
                 pwm_s1_wr_addr = map_valve_to_a_channel(pwm_write_valve);
         end else begin
             pwm_s2_wr_en = 1'b1;
-            // s2组内的通道编号同样从Q0开始计算。
             if (pwm_write_is_b)
                 pwm_s2_wr_addr = map_valve_to_b_channel(pwm_write_valve);
             else
@@ -314,23 +294,44 @@ always_ff @(posedge clk or negedge rstn) begin
         fsm_state              <= STATE_INITIALIZE;
         timer_divider          <= '0;
         timer_pending          <= 1'b0;
-        work_index             <= '0;
-        work_end               <= '0;
-        apply_delay_ticks      <= '0;
-        apply_duration_ticks   <= '0;
+        current_time           <= 32'd0;
+        scan_time              <= 32'd0;
+        scan_advances_time     <= 1'b0;
+        schedule_scan_start    <= 1'b0;
         boost_time_setting     <= 16'd15;
         hold_duty_setting      <= 4'd5;
+        desired_open_status    <= '0;
+        batch_active           <= 1'b0;
+        batch_epoch            <= 32'd0;
+        drop_batch             <= 1'b0;
+        rejected_packet_count  <= 32'd0;
+        schedule_refresh_pending <= 1'b0;
+        work_index             <= '0;
         second_pwm_is_b        <= 1'b0;
         second_pwm_duty        <= '0;
-        second_return_to_apply <= 1'b0;
         valve_open_status      <= '0;
+    end else if (scheduler_reset) begin
+        // This sideband bypasses the in-order command FIFO. It can therefore
+        // reset a full scheduler even when an OPEN command is at the FIFO
+        // head. PWM configuration and the monotonic time base are preserved.
+        timer_divider            <= '0;
+        timer_pending            <= 1'b0;
+        scan_advances_time       <= 1'b0;
+        schedule_scan_start      <= 1'b0;
+        desired_open_status      <= '0;
+        batch_active             <= 1'b0;
+        drop_batch               <= 1'b0;
+        schedule_refresh_pending <= 1'b0;
+        work_index               <= '0;
+        second_pwm_is_b          <= 1'b0;
+        second_pwm_duty          <= '0;
+        fsm_state                <= STATE_VALVE_WAIT;
     end else begin
-        // Mirror the logical valve state for the two-row LED indicator board.
-        // Set it when energizing A/B and clear it when the close sequence
-        // starts. It remains high when B changes from boost to hold PWM.
-        if (apply_starts_now || timer_opens)
+        schedule_scan_start <= 1'b0;
+
+        if (valve_opens)
             valve_open_status[work_index] <= 1'b1;
-        else if (timer_closes)
+        else if (valve_closes)
             valve_open_status[work_index] <= 1'b0;
 
         if (timer_divider == TIMER_CYCLES - 1) begin
@@ -351,68 +352,89 @@ always_ff @(posedge clk or negedge rstn) begin
             end
 
             STATE_IDLE: begin
-                if (timer_pending) begin
-                    timer_pending <= 1'b0;
-                    work_index    <= '0;
-                    work_end      <= 6'd63;
-                    fsm_state     <= STATE_TIMER_WAIT;
-                end else if (command_valid) begin
+                if (schedule_refresh_pending && !batch_active) begin
+                    schedule_refresh_pending <= 1'b0;
+                    scan_advances_time  <= 1'b0;
+                    scan_time           <= current_time;
+                    schedule_scan_start <= 1'b1;
+                    fsm_state           <= STATE_SCHEDULE_WAIT;
+                end else if (timer_pending &&
+                             !batch_active && !drop_batch) begin
+                    timer_pending       <= 1'b0;
+                    scan_advances_time  <= 1'b1;
+                    current_time        <= current_time + 1'b1;
+                    scan_time           <= current_time + 1'b1;
+                    schedule_scan_start <= 1'b1;
+                    fsm_state           <= STATE_SCHEDULE_WAIT;
+                end else if (command_valid && command_ready) begin
                     if (command_opcode == COMMAND_SET) begin
+                        batch_active       <= 1'b0;
+                        drop_batch         <= 1'b0;
                         boost_time_setting <= command_param_0;
                         hold_duty_setting  <= command_param_1[3:0];
                         work_index         <= '0;
-                        work_end           <= 6'd63;
                         fsm_state          <= STATE_SET_WAIT;
+                    end else if (command_opcode == COMMAND_RESET) begin
+                        // Reset only the scheduler. PWM settings and the
+                        // monotonic time base remain intact for later packets.
+                        timer_divider            <= '0;
+                        timer_pending            <= 1'b0;
+                        scan_advances_time       <= 1'b0;
+                        batch_active             <= 1'b0;
+                        drop_batch               <= 1'b0;
+                        schedule_refresh_pending <= 1'b0;
+                        desired_open_status      <= '0;
+                        work_index               <= '0;
+                        fsm_state                <= STATE_VALVE_WAIT;
                     end else if (command_opcode == COMMAND_OPEN) begin
-                        work_index           <= command_start;
-                        work_end             <= command_end;
-                        apply_delay_ticks    <= command_delay_ticks;
-                        apply_duration_ticks <= command_duration_ticks;
-                        fsm_state            <= STATE_APPLY_WAIT;
+                        if (drop_batch) begin
+                            if (command_batch_last)
+                                drop_batch <= 1'b0;
+                        end else if (!batch_active && !open_packet_fits) begin
+                            // Capacity is reserved for the complete packet or
+                            // none of it. Drain a rejected packet without ever
+                            // appending a partial batch to the schedule table.
+                            rejected_packet_count <=
+                                rejected_packet_count + 1'b1;
+                            drop_batch <= !command_batch_last;
+                        end else begin
+                            if (!batch_active)
+                                batch_epoch <= current_time;
+                            batch_active <= !command_batch_last;
+                            if (command_batch_last)
+                                schedule_refresh_pending <= 1'b1;
+                        end
                     end
                 end
             end
 
-            STATE_APPLY_WAIT:
-                fsm_state <= STATE_APPLY_PROCESS;
-
-            STATE_APPLY_PROCESS: begin
-                if (apply_starts_now) begin
-                    second_pwm_is_b        <= 1'b1;
-                    second_pwm_duty        <=
-                        (boost_time_setting == 0) ?
-                            hold_duty_setting : FULL_DUTY;
-                    second_return_to_apply <= 1'b1;
-                    fsm_state              <= STATE_PWM_SECOND;
-                end else if (work_index == work_end) begin
-                    fsm_state <= STATE_IDLE;
-                end else begin
-                    work_index <= work_index + 1'b1;
-                    fsm_state  <= STATE_APPLY_WAIT;
+            STATE_SCHEDULE_WAIT: begin
+                if (schedule_scan_done) begin
+                    desired_open_status <= schedule_active_mask;
+                    work_index <= '0;
+                    fsm_state  <= STATE_VALVE_WAIT;
                 end
             end
 
-            STATE_TIMER_WAIT:
-                fsm_state <= STATE_TIMER_PROCESS;
+            STATE_VALVE_WAIT:
+                fsm_state <= STATE_VALVE_PROCESS;
 
-            STATE_TIMER_PROCESS: begin
-                if (timer_opens) begin
-                    second_pwm_is_b        <= 1'b1;
-                    second_pwm_duty        <=
+            STATE_VALVE_PROCESS: begin
+                if (valve_opens) begin
+                    second_pwm_is_b <= 1'b1;
+                    second_pwm_duty <=
                         (boost_time_setting == 0) ?
                             hold_duty_setting : FULL_DUTY;
-                    second_return_to_apply <= 1'b0;
-                    fsm_state              <= STATE_PWM_SECOND;
-                end else if (timer_closes) begin
-                    second_pwm_is_b        <= 1'b0;
-                    second_pwm_duty        <= 4'd0;
-                    second_return_to_apply <= 1'b0;
-                    fsm_state              <= STATE_PWM_SECOND;
-                end else if (work_index == work_end) begin
+                    fsm_state <= STATE_PWM_SECOND;
+                end else if (valve_closes) begin
+                    second_pwm_is_b <= 1'b0;
+                    second_pwm_duty <= 4'd0;
+                    fsm_state <= STATE_PWM_SECOND;
+                end else if (work_index == VALVE_COUNT - 1) begin
                     fsm_state <= STATE_IDLE;
                 end else begin
                     work_index <= work_index + 1'b1;
-                    fsm_state  <= STATE_TIMER_WAIT;
+                    fsm_state  <= STATE_VALVE_WAIT;
                 end
             end
 
@@ -420,7 +442,7 @@ always_ff @(posedge clk or negedge rstn) begin
                 fsm_state <= STATE_SET_PROCESS;
 
             STATE_SET_PROCESS: begin
-                if (work_index == work_end) begin
+                if (work_index == VALVE_COUNT - 1) begin
                     fsm_state <= STATE_IDLE;
                 end else begin
                     work_index <= work_index + 1'b1;
@@ -429,14 +451,11 @@ always_ff @(posedge clk or negedge rstn) begin
             end
 
             STATE_PWM_SECOND: begin
-                if (work_index == work_end) begin
+                if (work_index == VALVE_COUNT - 1) begin
                     fsm_state <= STATE_IDLE;
                 end else begin
                     work_index <= work_index + 1'b1;
-                    if (second_return_to_apply)
-                        fsm_state <= STATE_APPLY_WAIT;
-                    else
-                        fsm_state <= STATE_TIMER_WAIT;
+                    fsm_state  <= STATE_VALVE_WAIT;
                 end
             end
 

@@ -4,6 +4,7 @@ module command_fifo #(
 )(
     input  wire                   clk,
     input  wire                   rstn,
+    input  wire                   clear,
     input  wire                   wr_en,
     input  wire  [DATA_WIDTH-1:0] wr_data,
     input  wire                   rd_en,
@@ -28,6 +29,10 @@ assign full    = (item_count == DEPTH);
 
 always_ff @(posedge clk or negedge rstn) begin
     if (!rstn) begin
+        write_pointer <= '0;
+        read_pointer  <= '0;
+        item_count    <= '0;
+    end else if (clear) begin
         write_pointer <= '0;
         read_pointer  <= '0;
         item_count    <= '0;

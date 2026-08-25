@@ -25,10 +25,12 @@ valve_controller #(
     .CLK_FREQ_HZ (1_000),
     .TIMER_HZ    (1),
     .VALVE_COUNT (64),
-    .PWM_LEVELS  (10)
+    .PWM_LEVELS  (10),
+    .SCHEDULE_DEPTH (256)
 ) dut (
     .clk              (clk),
     .rstn             (rstn),
+    .scheduler_reset  (1'b0),
     .command_valid    (command_valid),
     .command_data     (command_data),
     .command_ready    (command_ready),
@@ -55,7 +57,9 @@ endtask
 task automatic set_pwm_parameters;
     begin
         // COMMAND_SET: boost for 2 timer ticks, then hold at duty 5/10.
-        send_command({2'd2, 6'd0, 6'd0, 16'd2, 16'd5, 18'd0});
+        send_command({
+            2'd2, 6'd0, 6'd0, 16'd2, 16'd5, 1'b1, 17'd0
+        });
         wait (command_ready);
     end
 endtask
@@ -67,7 +71,7 @@ task automatic open_valve(
 );
     begin
         send_command({2'd1, valve_number, valve_number,
-                      delay_ms, duration_ms, 18'd0});
+                      delay_ms, duration_ms, 1'b1, 17'd0});
     end
 endtask
 

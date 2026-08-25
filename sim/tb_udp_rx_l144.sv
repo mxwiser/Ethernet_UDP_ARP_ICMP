@@ -70,7 +70,7 @@ module tb_udp_rx_l144;
     );
 
     udp_command_parser command_parser (
-        .clk(clk), .rstn(rstn),
+        .clk(clk), .rstn(rstn), .clear(1'b0),
         .udp_rxstart(udp_rxstart), .udp_rxend(udp_rxend),
         .udp_rxframe_done(udp_rxframe_done), .udp_rxdv(udp_rxdv),
         .udp_rxdata(udp_rxdata), .udp_rxamount(udp_rxamount),
@@ -115,24 +115,25 @@ module tb_udp_rx_l144;
         reg [31:0] command_crc;
         reg [31:0] ethernet_crc;
         begin
-            build_frame(12, 5, 0, 8'h00);
+            build_frame(13, 5, 0, 8'h00);
             payload_start = 50;
             frame[payload_start+0] = 8'hff;
             frame[payload_start+1] = 8'h01;
-            frame[payload_start+2] = 8'd3;
-            frame[payload_start+3] = 8'd4;
-            frame[payload_start+4] = 8'h00;
+            frame[payload_start+2] = 8'd1;
+            frame[payload_start+3] = 8'd3;
+            frame[payload_start+4] = 8'd4;
             frame[payload_start+5] = 8'h00;
             frame[payload_start+6] = 8'h00;
-            frame[payload_start+7] = 8'h64;
+            frame[payload_start+7] = 8'h00;
+            frame[payload_start+8] = 8'h64;
             command_crc = 32'hffffffff;
-            for (i = 0; i < 8; i = i + 1)
+            for (i = 0; i < 9; i = i + 1)
                 command_crc = crc32_byte(command_crc, frame[payload_start+i]);
             command_crc = command_crc ^ 32'hffffffff;
-            frame[payload_start+8]  = command_crc[31:24];
-            frame[payload_start+9]  = command_crc[23:16];
-            frame[payload_start+10] = command_crc[15:8];
-            frame[payload_start+11] = command_crc[7:0];
+            frame[payload_start+9]  = command_crc[31:24];
+            frame[payload_start+10] = command_crc[23:16];
+            frame[payload_start+11] = command_crc[15:8];
+            frame[payload_start+12] = command_crc[7:0];
 
             ethernet_crc = 32'hffffffff;
             for (i = 8; i < frame_size-4; i = i + 1)
